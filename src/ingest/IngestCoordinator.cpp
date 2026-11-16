@@ -34,8 +34,13 @@ void PendingImageCache::remove(const QString &imageName)
 void PendingImageCache::prune(const QDateTime &now)
 {
     const QDateTime cutoff = now.addSecs(-kMaxAgeSecs);
+    // 每收到一张图都会调用：超时淘汰每次做，逐个确认文件是否仍存在（访问磁盘）最多每分钟一次；
+    // 取用时 find 还会再确认文件存在，被删除的文件不会被关联
+    const bool checkFiles = !m_lastFileCheck.isValid() || m_lastFileCheck.secsTo(now) >= kFileCheckSecs
+                            || now < m_lastFileCheck;
+    if (checkFiles) m_lastFileCheck = now;
     for (auto it = m_entries.begin(); it != m_entries.end();) {
-        if (it->receivedAt < cutoff || !QFile::exists(it->filePath)) it = m_entries.erase(it);
+        if (it->receivedAt < cutoff || (checkFiles && !QFile::exists(it->filePath))) it = m_entries.erase(it);
         else ++it;
     }
 

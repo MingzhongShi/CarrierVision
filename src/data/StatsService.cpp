@@ -129,12 +129,20 @@ QVariantList rackPhotoCounts(const QSqlDatabase &db)
 
     QVector<int> counts(50, 0);
     QSqlQuery query(db);
+    // 计数表由触发器维护（DbSchema）；表不存在时回退到直接统计
     query.prepare(QStringLiteral(
-        "SELECT carrier_id, COUNT(*) FROM record "
-        "WHERE carrier_id BETWEEN 1 AND 50 "
-        "AND wheel_id = 1 "
-        "GROUP BY carrier_id"));
-    if (query.exec()) {
+        "SELECT carrier_id, total FROM carrier_wheel_counts "
+        "WHERE carrier_id BETWEEN 1 AND 50 AND wheel_id = 1"));
+    bool counted = query.exec();
+    if (!counted) {
+        query.prepare(QStringLiteral(
+            "SELECT carrier_id, COUNT(*) FROM record "
+            "WHERE carrier_id BETWEEN 1 AND 50 "
+            "AND wheel_id = 1 "
+            "GROUP BY carrier_id"));
+        counted = query.exec();
+    }
+    if (counted) {
         while (query.next()) {
             const int rack = query.value(0).toInt();
             if (rack >= 1 && rack <= 50) counts[rack - 1] = query.value(1).toInt();
@@ -254,11 +262,20 @@ QVariantMap homepageCurrentDetection(const QSqlDatabase &db, int preferredRack)
     int ngCount = 0;
     int totalCount = 0;
     QSqlQuery totalQuery(db);
+    // 计数表由触发器维护（DbSchema），无需每批都对保留期内全部记录做 COUNT；表不存在时回退到直接统计
     totalQuery.prepare(QStringLiteral(
-        "SELECT COUNT(*), SUM(CASE WHEN result = 0 THEN 1 ELSE 0 END) FROM record "
+        "SELECT COALESCE(SUM(total), 0), COALESCE(SUM(ng), 0) FROM carrier_wheel_counts "
         "WHERE carrier_id = :rack AND wheel_id BETWEEN 1 AND 16"));
     totalQuery.bindValue(QStringLiteral(":rack"), rackNumber);
-    if (totalQuery.exec() && totalQuery.next()) {
+    bool counted = totalQuery.exec();
+    if (!counted) {
+        totalQuery.prepare(QStringLiteral(
+            "SELECT COUNT(*), SUM(CASE WHEN result = 0 THEN 1 ELSE 0 END) FROM record "
+            "WHERE carrier_id = :rack AND wheel_id BETWEEN 1 AND 16"));
+        totalQuery.bindValue(QStringLiteral(":rack"), rackNumber);
+        counted = totalQuery.exec();
+    }
+    if (counted && totalQuery.next()) {
         totalCount = totalQuery.value(0).toInt();
         ngCount = totalQuery.value(1).toInt();
     }
