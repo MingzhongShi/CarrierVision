@@ -290,21 +290,26 @@ void AppController::setTcpPort(int port)
     emit tcpServerStateChanged();
 }
 
-bool AppController::processTcpBatch(const QJsonObject &batchData, QString &error)
+// TCP 批次入库：解析与待关联图片匹配在主线程（轻量），写库和卡片图片查找在单线程写库池中按到达顺序执行，
+// 完成后回到主线程刷新 12 宫格并回包。凌晨清理、空间回收持有写锁时，最多等待的是写库线程而不是界面。
+void AppController::submitTcpBatch(const QJsonObject &batchData, TcpDataReceiver::BatchDone done)
 {
     if (m_storageLevel >= StorageMonitor::Level::RejectData) {
-        error = QStringLiteral("服务器存储空间不足，暂停接收数据");
+        const QString error = QStringLiteral("服务器存储空间不足，暂停接收数据");
         LOG_ERROR("[TCP] {}", error.toStdString());
-        return false;
+        done(false, error);
+        return;
     }
     ImageIngest::ParseLimits limits;
     limits.now = QDateTime::currentDateTime();
     limits.maxAgeDays = qBound(1, cleanupKeepDays(), 3650);
     ImageIngest::BatchData batch;
-    if (!ImageIngest::parseBatchJson(batchData, batch, error, limits)) {
-        LOG_ERROR("[TCP] 批次数据解析失败: {}", error.toStdString());
-        setStatusMessage(QStringLiteral("TCP 报文解析失败: %1").arg(error));
-        return false;
+    QString parseError;
+    if (!ImageIngest::parseBatchJson(batchData, batch, parseError, limits)) {
+        LOG_ERROR("[TCP] 批次数据解析失败: {}", parseError.toStdString());
+        setStatusMessage(QStringLiteral("TCP 报文解析失败: %1").arg(parseError));
+        done(false, parseError);
+        return;
     }
 
     // FTP 图像可能先于本批次到达：按客户端请求的文件名匹配缓存，实际路径随记录一起入库
@@ -314,28 +319,48 @@ bool AppController::processTcpBatch(const QJsonObject &batchData, QString &error
         if (!wheel.imagePath.isEmpty()) consumed << wheel.imageName;
     }
 
-    {
-        QMutexLocker lock(&m_dbMutex);
-        if (!ImageIngest::recordBatch(QSqlDatabase::database(), batch, error)) {
-            LOG_ERROR("[TCP] 数据原子入库失败: {}", error.toStdString());
-            setStatusMessage(QStringLiteral("数据入库失败: %1").arg(error));
-            return false;
+    const QString archiveDir = m_archiveDirectory;
+    const QString sourceDir = m_sourceDirectory;
+    (void)QtConcurrent::run(&m_writePool, [this, batch, consumed, archiveDir, sourceDir, done]() {
+        QString error;
+        QSqlDatabase db = getThreadDatabase();
+        bool ok = db.isValid() && db.isOpen();
+        if (!ok) error = QStringLiteral("数据库连接不可用");
+        else ok = ImageIngest::recordBatch(db, batch, error);
+
+        QVector<ImageItem> cards;
+        if (ok) {
+            QHash<QString, QString> associated;
+            for (const ImageIngest::WheelItem &wheel : batch.wheels) {
+                if (!wheel.imagePath.isEmpty()) associated.insert(wheel.imageName, wheel.imagePath);
+            }
+            const QString batchTime = AgcUtils::formatDateTime(batch.timestamp);
+            cards = IngestCoordinator::buildStationCards(batch, [&](const QString &imageName) {
+                const QString path = associated.value(imageName);
+                // 图片尚未到达：先按文件名在图像目录查找用于显示，到达后由 onFtpImageStored 更新卡片与记录
+                return path.isEmpty() ? resolveRecordImage(QString(), imageName, archiveDir, sourceDir, batchTime) : path;
+            });
         }
+        QMetaObject::invokeMethod(this, [this, batch, consumed, cards, ok, error, done]() {
+            finishTcpBatch(batch, consumed, cards, ok, error, done);
+        }, Qt::QueuedConnection);
+    });
+}
+
+void AppController::finishTcpBatch(const ImageIngest::BatchData &batch, const QStringList &consumed,
+                                   QVector<ImageItem> cards, bool ok, const QString &error,
+                                   const TcpDataReceiver::BatchDone &done)
+{
+    if (!ok) {
+        LOG_ERROR("[TCP] 数据原子入库失败: 载具 #{}, {}", batch.carrierId, error.toStdString());
+        setStatusMessage(QStringLiteral("数据入库失败: %1").arg(error));
+        done(false, error);
+        return;
     }
-    for (const QString &imageName : std::as_const(consumed)) m_pendingImages.remove(imageName);
+    for (const QString &imageName : consumed) m_pendingImages.remove(imageName);
 
     m_currentCarrierId = batch.carrierId;
     m_currentRoundNumber = 0;
-    QHash<QString, QString> associated;
-    for (const ImageIngest::WheelItem &wheel : std::as_const(batch.wheels)) {
-        if (!wheel.imagePath.isEmpty()) associated.insert(wheel.imageName, wheel.imagePath);
-    }
-    QVector<ImageItem> cards = IngestCoordinator::buildStationCards(batch, [&](const QString &imageName) {
-        const QString path = associated.value(imageName);
-        // 图片尚未到达：先按文件名在归档目录查找用于显示，到达后由 onFtpImageStored 更新卡片与记录
-        return path.isEmpty() ? resolveRecordImage(QString(), imageName, m_archiveDirectory, m_sourceDirectory,
-                                                  AgcUtils::formatDateTime(batch.timestamp)) : path;
-    });
     // 一个载具分多次触发（每次 6 个相机）：同一载具的后续批次只刷新本批相机，
     // 其余工位保留该载具前几批的卡片；换载具或间隔过久时整屏刷新
     int keptCards = 0;
@@ -363,7 +388,7 @@ bool AppController::processTcpBatch(const QJsonObject &batchData, QString &error
     LOG_INFO("[TCP] 载具 #{} 数据已成功入库并刷新 12 宫格卡片: 轮数={}, 已关联图片的轮={}, 待图片到达的轮={}, 保留同载具前批卡片={}",
              batch.carrierId, batch.wheels.size(), consumed.size(), batch.wheels.size() - consumed.size(), keptCards);
     setStatusMessage(QStringLiteral("载具 #%1 测量数据已接收，共 %2 轮").arg(batch.carrierId).arg(batch.wheels.size()));
-    return true;
+    done(true, QString());
 }
 
 void AppController::onFtpImageStored(const QString &filePath, const QString &requestedPath)
@@ -373,27 +398,42 @@ void AppController::onFtpImageStored(const QString &filePath, const QString &req
     const QString absolutePath = file.absoluteFilePath();
     // 以客户端请求的文件名关联：同名不同内容被保存为 _vN 时，仍对应报文中的 imageName
     const QString requestedName = QFileInfo(requestedPath.isEmpty() ? filePath : requestedPath).fileName();
-    const QString resolvedUrl = QUrl::fromLocalFile(absolutePath).toString();
     SearchService::noteImageStored(absolutePath);
 
+    // 先放入待关联缓存：回填在写库线程排队期间到达的批次也能取到这张图；回填到记录后再移出
+    const QDateTime now = QDateTime::currentDateTime();
+    m_pendingImages.add(requestedName, absolutePath, now);
+    m_pendingImages.prune(now);
+
     // 记录先到的情况：补写实际路径。仅限最近 1 小时、尚未关联的记录，
-    // 避免升级前的历史记录（image_path 均为空）被同名新图误关联
-    int linkedRows = 0;
-    {
-        QMutexLocker locker(&m_dbMutex);
+    // 避免升级前的历史记录（image_path 均为空）被同名新图误关联。与批次入库在同一写库线程按到达顺序执行
+    (void)QtConcurrent::run(&m_writePool, [this, requestedName, absolutePath, now]() {
         QString linkError;
-        linkedRows = ImageIngest::linkRecordImage(QSqlDatabase::database(), requestedName, absolutePath,
-                                                  QDateTime::currentDateTime().addSecs(-3600), linkError);
-        if (linkedRows < 0) {
-            linkedRows = 0;
-            LOG_ERROR("[FTP] 补写图片路径失败: 文件={}, 原因={}", requestedName.toStdString(), linkError.toStdString());
-        }
+        QSqlDatabase db = getThreadDatabase();
+        int linkedRows = db.isValid() && db.isOpen()
+            ? ImageIngest::linkRecordImage(db, requestedName, absolutePath, now.addSecs(-3600), linkError)
+            : -1;
+        if (linkedRows < 0 && linkError.isEmpty()) linkError = QStringLiteral("数据库连接不可用");
+        QMetaObject::invokeMethod(this, [this, requestedName, absolutePath, linkedRows, linkError]() {
+            finishImageLink(requestedName, absolutePath, linkedRows, linkError);
+        }, Qt::QueuedConnection);
+    });
+}
+
+void AppController::finishImageLink(const QString &requestedName, const QString &absolutePath,
+                                    int linkedRows, const QString &linkError)
+{
+    if (linkedRows < 0) {
+        linkedRows = 0;
+        LOG_ERROR("[FTP] 补写图片路径失败: 文件={}, 原因={}", requestedName.toStdString(), linkError.toStdString());
     }
 
-    // 只更新正在等待这张图的批次卡片；否则（如 _vN 新图先于其批次到达）放入缓存，
+    // 只更新正在等待这张图的批次卡片；否则（如 _vN 新图先于其批次到达）留在缓存中，
     // 避免把新图显示到界面上同名的上一批次卡片上
     bool matchedCard = false;
     if (linkedRows > 0) {
+        if (m_pendingImages.find(requestedName) == absolutePath) m_pendingImages.remove(requestedName);
+        const QString resolvedUrl = QUrl::fromLocalFile(absolutePath).toString();
         const QString imageKey = IngestCoordinator::imageKey(requestedName);
         for (int i = 0; i < m_currentImagesModel.count(); ++i) {
             ImageItem item = m_currentImagesModel.itemAt(i);
@@ -404,20 +444,15 @@ void AppController::onFtpImageStored(const QString &filePath, const QString &req
                 matchedCard = true;
             }
         }
-    } else {
-        const QDateTime now = QDateTime::currentDateTime();
-        m_pendingImages.add(requestedName, absolutePath, now);
-        m_pendingImages.prune(now);
+        emit recordImagesChanged();
     }
-
-    if (linkedRows > 0) emit recordImagesChanged();
 
     ++m_loggedImageCount;
     m_loggedLinkedRows += qMax(0, linkedRows);
     if (linkedRows == 0) ++m_loggedCachedImages;
     LOG_DEBUG("[FTP] 图像文件入库归档: {}{}, 关联卡片={}, 关联记录={}, 待关联缓存={}",
-             file.fileName().toStdString(),
-             requestedName != file.fileName() ? (" (请求名 " + requestedName.toStdString() + ")") : std::string(),
+             QFileInfo(absolutePath).fileName().toStdString(),
+             requestedName != QFileInfo(absolutePath).fileName() ? (" (请求名 " + requestedName.toStdString() + ")") : std::string(),
              matchedCard, linkedRows, m_pendingImages.size());
 }
 

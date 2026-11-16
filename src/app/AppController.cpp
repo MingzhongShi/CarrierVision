@@ -249,6 +249,8 @@ AppController::AppController(QObject *parent)
     m_maintenancePool.setMaxThreadCount(1);
     m_maintenancePool.setExpiryTimeout(-1);
     m_exportPool.setMaxThreadCount(1);
+    m_writePool.setMaxThreadCount(1);
+    m_writePool.setExpiryTimeout(-1);
     connect(&m_logWatcher, &QFutureWatcher<QVariantMap>::finished, this, [this]() {
         m_logBusy = false;
         if (m_activeLogRequest == m_logGeneration) emit logQueryFinished(m_activeLogRequest, m_logWatcher.result());
@@ -348,8 +350,8 @@ AppController::AppController(QObject *parent)
         emit tcpServerStateChanged();
     });
     // TcpDataReceiver 自身已写日志，logMessage 不再转发写入，避免每条记录两次
-    m_tcpReceiver.batchHandler = [this](const QJsonObject &data, QString &error) {
-        return processTcpBatch(data, error);
+    m_tcpReceiver.asyncBatchHandler = [this](const QJsonObject &data, TcpDataReceiver::BatchDone done) {
+        submitTcpBatch(data, std::move(done));
     };
 
     startTcpServer();
@@ -369,8 +371,9 @@ AppController::~AppController()
     m_ftpThread.quit();
     m_ftpThread.wait(); // finished 时 deleteLater 回收 m_ftpService
     m_ftpService = nullptr;
-    flushImageIngestLog();
     stopTcpServer();
+    m_writePool.waitForDone(); // 已收到的批次和图片回填写完再退出
+    flushImageIngestLog();
     ++m_searchGeneration;
     ++m_alertSearchGeneration;
     m_searchPool.clear();

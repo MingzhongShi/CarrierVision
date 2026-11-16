@@ -256,6 +256,30 @@ QStringList AppController::storagePaths() const
             AppLogger::getLogDirectory()};
 }
 
+void AppController::scheduleIntegrityCheck()
+{
+    const QString dbPath = DBSchema::defaultDatabasePath();
+    (void)QtConcurrent::run(&m_maintenancePool, [this, dbPath]() {
+        QElapsedTimer timer;
+        timer.start();
+        QSqlDatabase db = getThreadDatabase();
+        QString detail;
+        const bool healthy = db.isOpen() && DatabaseGuard::quickCheck(db, detail);
+        if (!db.isOpen()) detail = QStringLiteral("后台数据库连接不可用");
+        const qint64 elapsed = timer.elapsed();
+        QMetaObject::invokeMethod(this, [this, dbPath, healthy, detail, elapsed]() {
+            if (healthy) {
+                LOG_INFO("[DB] 异常退出后的完整性检查通过，用时 {} ms", elapsed);
+                return;
+            }
+            QFile marker(DatabaseGuard::corruptMarkerPath(dbPath));
+            if (marker.open(QIODevice::WriteOnly)) marker.write(detail.toUtf8());
+            LOG_CRITICAL("[DB] 异常退出后的完整性检查失败: {}；请尽快重启程序，启动时将自动从备份恢复", detail.toStdString());
+            setStatusMessage(QStringLiteral("数据库完整性检查失败，请尽快重启程序以自动恢复"));
+        }, Qt::QueuedConnection);
+    });
+}
+
 void AppController::checkStorage()
 {
     int warn = 10, rejectUploads = 5, rejectData = 2;

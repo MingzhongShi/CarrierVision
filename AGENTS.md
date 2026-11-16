@@ -27,6 +27,7 @@
 
 - 主线程只做界面与轻量调度。FTP 服务在独立线程（`m_ftpThread`），统计、查询、维护和日志检索在各自的 `QThreadPool` 中用 `QtConcurrent::run` 执行。新的耗时操作照此处理，不得阻塞主事件循环。
 - 访问主数据库连接要持有 `m_dbMutex`；后台线程通过 `getThreadDatabase()` 使用按线程区分的独立连接。
+- 检测数据写库（TCP 批次入库、FTP 图片路径回填）都在单线程的 `m_writePool` 中按到达顺序执行，完成后回到主线程刷新界面；TCP 回包在入库完成后才发出（`TcpDataReceiver::asyncBatchHandler`）。不要再在主线程上写检测数据。
 - C++ 用 `LOG_INFO` / `LOG_WARN` / `LOG_ERROR`（`common/AppLogger.h`）写日志，内容用中文，带上关键标识（载具号、文件名、端口）。日志每秒落盘，现场可直接查看 `logs/carrier_YYYY-MM-DD.log`。
 - 关键路径要留下可核对的统计日志，例如 TCP 入库时记录"已关联图片的轮 / 待图片到达的轮"，联调时据此判断关联是否完整。
 
