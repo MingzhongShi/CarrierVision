@@ -34,9 +34,65 @@ QString normalizeImageName(const QString &raw, QString &error, bool *strippedPat
         error = QStringLiteral("imageName 不是支持的图片格式: %1").arg(name.left(128));
         return QString();
     }
+    if (name.size() > AgcUtils::kMaxImageNameLength) {
+        error = QStringLiteral("imageName 文件名过长（%1 字符，上限 %2）: %3")
+                    .arg(name.size()).arg(AgcUtils::kMaxImageNameLength).arg(name.left(128));
+        return QString();
+    }
     if (strippedPath) *strippedPath = separator >= 0;
     return name;
 }
+
+namespace {
+
+bool readFiniteNumber(const QJsonObject &obj, const QString &field, double &out, QString &error)
+{
+    const QJsonValue value = obj.value(field);
+    if (value.isUndefined() || value.isNull()) {
+        error = QStringLiteral("缺少字段 %1").arg(field);
+        return false;
+    }
+    if (!value.isDouble() || !std::isfinite(value.toDouble())) {
+        error = QStringLiteral("字段 %1 必须为有限数值").arg(field);
+        return false;
+    }
+    out = value.toDouble();
+    return true;
+}
+
+// 新协议：minValue/maxValue/baseValue/deviation 四个字段必填；
+// 过渡期兼容旧协议：四个新字段都没有而带 actualDistance 时，按最小=最大=actualDistance 入库，偏差值为空
+bool readMeasurements(const QJsonObject &wObj, WheelItem &item, QString &error)
+{
+    static const QString kNewFields[] = {QStringLiteral("minValue"), QStringLiteral("maxValue"),
+                                         QStringLiteral("baseValue"), QStringLiteral("deviation")};
+    bool anyNew = false;
+    for (const QString &field : kNewFields) anyNew = anyNew || wObj.contains(field);
+
+    if (!anyNew && wObj.contains(QStringLiteral("actualDistance"))) {
+        double actual = 0.0;
+        if (!readFiniteNumber(wObj, QStringLiteral("actualDistance"), actual, error)) return false;
+        double base = 0.0;
+        double tolerance = 0.0;
+        if (wObj.contains(QStringLiteral("baseDistance"))
+            && !readFiniteNumber(wObj, QStringLiteral("baseDistance"), base, error)) return false;
+        if (wObj.contains(QStringLiteral("lowerTolerance"))
+            && !readFiniteNumber(wObj, QStringLiteral("lowerTolerance"), tolerance, error)) return false;
+        item.minValue = actual;
+        item.maxValue = actual;
+        item.baseValue = base;
+        item.lowerTolerance = tolerance;
+        item.legacyProtocol = true;
+        return true;
+    }
+
+    return readFiniteNumber(wObj, kNewFields[0], item.minValue, error)
+        && readFiniteNumber(wObj, kNewFields[1], item.maxValue, error)
+        && readFiniteNumber(wObj, kNewFields[2], item.baseValue, error)
+        && readFiniteNumber(wObj, kNewFields[3], item.deviation, error);
+}
+
+} // namespace
 
 bool parseBatchJson(const QJsonObject &obj, BatchData &out, QString &error, const ParseLimits &limits)
 {
@@ -106,6 +162,7 @@ bool parseBatchJson(const QJsonObject &obj, BatchData &out, QString &error, cons
     QSet<QString> wheelKeys;
     QString pathExample;
     int strippedCount = 0;
+    int legacyCount = 0;
     for (const QJsonValue &val : wheelsArr) {
         if (!val.isObject()) {
             error = QStringLiteral("wheels 中包含非对象元素");
@@ -128,18 +185,19 @@ bool parseBatchJson(const QJsonObject &obj, BatchData &out, QString &error, cons
         }
         item.wheelId = static_cast<int>(wheelNumber);
         item.cameraId = static_cast<int>(cameraNumber);
-        item.actualDistance = wObj.value(QStringLiteral("actualDistance")).toDouble();
-        item.baseDistance = wObj.value(QStringLiteral("baseDistance")).toDouble();
-        item.lowerTolerance = wObj.value(QStringLiteral("lowerTolerance")).toDouble();
+        if (item.wheelId < 1 || item.wheelId > 16 || item.cameraId < 1 || item.cameraId > 12) {
+            error = QStringLiteral("轮号或相机号超出有效范围");
+            return false;
+        }
+        if (!readMeasurements(wObj, item, error)) {
+            error = QStringLiteral("轮 %1: %2").arg(item.wheelId).arg(error);
+            return false;
+        }
+        if (item.legacyProtocol) ++legacyCount;
 
         const QString rawImageName = wObj.value(QStringLiteral("imageName")).toString();
-        if (item.wheelId < 1 || item.wheelId > 16
-            || item.cameraId < 1 || item.cameraId > 12
-            || !std::isfinite(item.actualDistance)
-            || !std::isfinite(item.baseDistance)
-            || !std::isfinite(item.lowerTolerance)
-            || rawImageName.size() > 512 || rawImageName.contains(QChar::Null)) {
-            error = QStringLiteral("轮号、相机号、距离或图片名超出有效范围");
+        if (rawImageName.size() > 512 || rawImageName.contains(QChar::Null)) {
+            error = QStringLiteral("imageName 超过 512 字符或包含非法字符");
             return false;
         }
         bool stripped = false;
@@ -185,6 +243,11 @@ bool parseBatchJson(const QJsonObject &obj, BatchData &out, QString &error, cons
     if (strippedCount > 0) {
         LOG_WARN("[TCP] 载具 {} 的 {} 个轮 imageName 含路径，已只取文件名（例: '{}'），请客户端只发送文件名",
                  out.carrierId, strippedCount, pathExample.toStdString());
+    }
+    if (legacyCount > 0) {
+        LOG_WARN("[TCP] 载具 {} 的 {} 个轮使用旧协议字段 actualDistance/baseDistance/lowerTolerance，"
+                 "已按最小=最大=actualDistance 兼容入库且偏差值为空，请升级视觉端改发 minValue/maxValue/baseValue/deviation",
+                 out.carrierId, legacyCount);
     }
 
     return true;
@@ -237,8 +300,9 @@ bool recordBatch(QSqlDatabase db, const BatchData &batch, QString &error)
 
     QSqlQuery q(db);
     if (!q.prepare(R"(
-        INSERT INTO record(createtime, carrier_id, camera_id, wheel_id, result, distance, dist_norm, lower_tolerance, imagename, batch_id, image_path)
-        VALUES(:time, :carrier, :camera, :wheel, :result, :dist, :norm, :tol, :image, :batch, :path)
+        INSERT INTO record(createtime, carrier_id, camera_id, wheel_id, result, distance, dist_norm, lower_tolerance, imagename, batch_id, image_path,
+                           min_value, max_value, deviation)
+        VALUES(:time, :carrier, :camera, :wheel, :result, :dist, :norm, :tol, :image, :batch, :path, :min, :max, :dev)
     )")) {
         error = q.lastError().text();
         db.rollback();
@@ -251,9 +315,13 @@ bool recordBatch(QSqlDatabase db, const BatchData &batch, QString &error)
         q.bindValue(QStringLiteral(":camera"), wheel.cameraId);
         q.bindValue(QStringLiteral(":wheel"), wheel.wheelId);
         q.bindValue(QStringLiteral(":result"), wheel.result);
-        q.bindValue(QStringLiteral(":dist"), wheel.actualDistance);
-        q.bindValue(QStringLiteral(":norm"), wheel.baseDistance);
+        // distance 保留为最小实测值，供旧的读取方（热力图文字等）继续使用
+        q.bindValue(QStringLiteral(":dist"), wheel.minValue);
+        q.bindValue(QStringLiteral(":norm"), wheel.baseValue);
         q.bindValue(QStringLiteral(":tol"), wheel.lowerTolerance);
+        q.bindValue(QStringLiteral(":min"), wheel.minValue);
+        q.bindValue(QStringLiteral(":max"), wheel.maxValue);
+        q.bindValue(QStringLiteral(":dev"), std::isfinite(wheel.deviation) ? QVariant(wheel.deviation) : QVariant());
         q.bindValue(QStringLiteral(":image"), wheel.imageName);
         q.bindValue(QStringLiteral(":batch"), batch.batchId);
         q.bindValue(QStringLiteral(":path"), wheel.imagePath.isEmpty() ? QVariant() : QVariant(wheel.imagePath));
@@ -272,6 +340,27 @@ bool recordBatch(QSqlDatabase db, const BatchData &batch, QString &error)
     }
 
     return true;
+}
+
+int linkRecordImage(QSqlDatabase db, const QString &imageName, const QString &absolutePath,
+                    const QDateTime &since, QString &error)
+{
+    QSqlQuery update(db);
+    update.prepare(QStringLiteral(
+        "UPDATE record SET image_path = :path "
+        "WHERE createtime >= :since AND imagename = :name COLLATE NOCASE "
+        // 写成 COALESCE 表达式而不是 "image_path IS NULL OR image_path = ''"：后者会让 SQLite 改走
+        // image_path 索引，逐行扫描全部未关联图片的历史记录（升级前的记录全部为空），
+        // 记录越多越慢，且在主线程上每收到一张图执行一次。表达式形式只走最近 1 小时的时间索引
+        "AND COALESCE(image_path, '') = ''"));
+    update.bindValue(QStringLiteral(":path"), absolutePath);
+    update.bindValue(QStringLiteral(":since"), AgcUtils::formatDateTime(since));
+    update.bindValue(QStringLiteral(":name"), imageName);
+    if (!update.exec()) {
+        error = update.lastError().text();
+        return -1;
+    }
+    return update.numRowsAffected();
 }
 
 namespace {

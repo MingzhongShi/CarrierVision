@@ -11,6 +11,8 @@
 #include "data/DbSchema.h"
 #include "common/AgcUtils.h"
 #include "ingest/ImageIngest.h"
+#include "ingest/IngestCoordinator.h"
+#include <cmath>
 #include "data/ArchiveMaintenance.h"
 #include "data/DatabaseGuard.h"
 #include "network/FtpServer.h"
@@ -19,6 +21,10 @@
 #include "common/AppLogger.h"
 #include "app/ThumbnailCache.h"
 #include "common/ImageExport.h"
+#include "common/LogExport.h"
+#include "common/ZipWriter.h"
+#include <QXmlStreamReader>
+#include <QtEndian>
 
 class ReleaseBoundaryTests : public QObject {
     Q_OBJECT
@@ -131,7 +137,8 @@ private slots:
     void batchJsonRejectsInvalidAndOversizedPayloads() {
         ImageIngest::BatchData batch;
         QString error;
-        QJsonObject wheel{{"wheelId", 1}, {"cameraId", 1}, {"result", "OK"}, {"imageName", "cam01.png"}};
+        QJsonObject wheel{{"wheelId", 1}, {"cameraId", 1}, {"minValue", 118.0}, {"maxValue", 121.0},
+                          {"baseValue", 120.0}, {"deviation", 1.0}, {"result", "OK"}, {"imageName", "cam01.png"}};
         QJsonObject root{{"carrierId", 1}, {"wheels", QJsonArray{wheel}}};
         QVERIFY(ImageIngest::parseBatchJson(root, batch, error));
 
@@ -147,6 +154,10 @@ private slots:
         QCOMPARE(imageNameResult("cam/"), QStringLiteral("<rejected>"));
         QCOMPARE(imageNameResult("../.hidden.png"), QStringLiteral("<rejected>"));
         QCOMPARE(imageNameResult("report.txt"), QStringLiteral("<rejected>"));
+        // 文件名超过 240 字符（NTFS 255 减去 .cv-pending 标记与 _vN 余量）拒收
+        QCOMPARE(imageNameResult(QString(236, u'a') + ".jpg"), QString(236, u'a') + ".jpg");
+        QCOMPARE(imageNameResult(QString(237, u'a') + ".jpg"), QStringLiteral("<rejected>"));
+        QVERIFY(error.contains(QStringLiteral("文件名过长")));
 
         // 时间戳范围：未来不超过 10 分钟，过去不超过保留天数；未提供限制时不检查
         const QDateTime now = QDateTime::fromString("2026-10-20 12:00:00", "yyyy-MM-dd HH:mm:ss");
@@ -682,9 +693,10 @@ private slots:
         ImageIngest::WheelItem wheel;
         wheel.wheelId = 1;
         wheel.cameraId = 1;
-        wheel.actualDistance = 12.5;
-        wheel.baseDistance = 10.0;
-        wheel.lowerTolerance = -2.0;
+        wheel.minValue = 12.5;
+        wheel.maxValue = 13.25;
+        wheel.baseValue = 10.0;
+        wheel.deviation = 3.25;
         wheel.result = 1; // OK
         wheel.imageName = "20260905_120000_w1.png";
         batch.wheels.append(wheel);
@@ -693,19 +705,292 @@ private slots:
         QVERIFY(ImageIngest::recordBatch(db, batch, error));
 
         QSqlQuery q(db);
-        QVERIFY(q.exec("SELECT carrier_id, wheel_id, distance, dist_norm, lower_tolerance, result, batch_id FROM record WHERE imagename = '20260905_120000_w1.png'"));
+        QVERIFY(q.exec("SELECT carrier_id, wheel_id, distance, dist_norm, min_value, max_value, deviation, result, batch_id "
+                       "FROM record WHERE imagename = '20260905_120000_w1.png'"));
         QVERIFY(q.next());
         QCOMPARE(q.value(0).toInt(), 1);
         QCOMPARE(q.value(1).toInt(), 1);
-        QCOMPARE(q.value(2).toDouble(), 12.5);
-        QCOMPARE(q.value(3).toDouble(), 10.0);
-        QCOMPARE(q.value(4).toDouble(), -2.0);
-        QCOMPARE(q.value(5).toInt(), 1);
-        QCOMPARE(q.value(6).toString(), QString("BATCH_1_2026-09-05 12:00:00"));
+        QCOMPARE(q.value(2).toDouble(), 12.5); // distance 保留为最小实测值
+        QCOMPARE(q.value(3).toDouble(), 10.0); // dist_norm 为基准值
+        QCOMPARE(q.value(4).toDouble(), 12.5);
+        QCOMPARE(q.value(5).toDouble(), 13.25);
+        QCOMPARE(q.value(6).toDouble(), 3.25);
+        QCOMPARE(q.value(7).toInt(), 1);
+        QCOMPARE(q.value(8).toString(), QString("BATCH_1_2026-09-05 12:00:00"));
 
         // verify index exists
         QVERIFY(q.exec("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_record_batch'"));
         QVERIFY(q.next());
+    }
+    // 视觉端报文示例（README 中同一条）：驱动轮图片名带最小/最大/基准/偏差/结果
+    static QJsonObject visionExampleBatch() {
+        return QJsonDocument::fromJson(R"({"carrierId":34,"timestamp":"20261116_142451","wheels":[)"
+            R"({"wheelId":9,"cameraId":5,"minValue":118.632,"maxValue":151.107,"baseValue":155.000,"deviation":-3.893,)"
+            R"("result":"OK","imageName":"CARRIER_34_20261116_142451_cam05_118.6_151.1_155.0_-3.9_OK.jpg"}]})").object();
+    }
+    void visionMeasurementFieldsParseRejectAndLegacyFallback() {
+        ImageIngest::BatchData batch;
+        QString error;
+        QJsonObject root = visionExampleBatch();
+        QVERIFY2(ImageIngest::parseBatchJson(root, batch, error), qPrintable(error));
+        QCOMPARE(batch.carrierId, 34);
+        QCOMPARE(batch.wheels.size(), 1);
+        const ImageIngest::WheelItem &w = batch.wheels.first();
+        QCOMPARE(w.wheelId, 9);
+        QCOMPARE(w.cameraId, 5);
+        QCOMPARE(w.minValue, 118.632);
+        QCOMPARE(w.maxValue, 151.107);
+        QCOMPARE(w.baseValue, 155.0);
+        QCOMPARE(w.deviation, -3.893);
+        QCOMPARE(w.result, 1);
+        QVERIFY(!w.legacyProtocol);
+        QCOMPARE(w.imageName, QStringLiteral("CARRIER_34_20261116_142451_cam05_118.6_151.1_155.0_-3.9_OK.jpg"));
+
+        const QJsonObject exampleWheel = root.value("wheels").toArray().first().toObject();
+        auto parseWheel = [&](const QJsonObject &wheel) {
+            QJsonObject r = root; r["wheels"] = QJsonArray{wheel};
+            return ImageIngest::parseBatchJson(r, batch, error);
+        };
+        // 偏差值按客户端上报原样保存，服务端不重算
+        QJsonObject inconsistent = exampleWheel; inconsistent["deviation"] = 9.5;
+        QVERIFY(parseWheel(inconsistent));
+        QCOMPARE(batch.wheels.first().deviation, 9.5);
+
+        // 新字段任一缺失、为 null、非数值都拒收，错误信息指明字段
+        for (const char *field : {"minValue", "maxValue", "baseValue", "deviation"}) {
+            QJsonObject missing = exampleWheel; missing.remove(field);
+            QVERIFY(!parseWheel(missing));
+            QVERIFY2(error.contains(QLatin1String(field)) && error.contains(QStringLiteral("缺少字段")), qPrintable(error));
+            QJsonObject nulled = exampleWheel; nulled[field] = QJsonValue::Null;
+            QVERIFY(!parseWheel(nulled));
+            QJsonObject text = exampleWheel; text[field] = "1.0";
+            QVERIFY(!parseWheel(text));
+            QVERIFY2(error.contains(QLatin1String(field)) && error.contains(QStringLiteral("有限数值")), qPrintable(error));
+        }
+        // 只带部分新字段时不走旧协议兼容
+        QJsonObject mixed = exampleWheel; mixed.remove("maxValue"); mixed["actualDistance"] = 120.0;
+        QVERIFY(!parseWheel(mixed));
+        QVERIFY(error.contains("maxValue"));
+
+        // 旧协议过渡兼容：最小=最大=actualDistance，基准=baseDistance，偏差值为空
+        QJsonObject legacy{{"wheelId", 9}, {"cameraId", 5}, {"actualDistance", 118.5}, {"baseDistance", 120.0},
+                           {"lowerTolerance", -1.5}, {"result", "NG"}, {"imageName", "legacy.png"}};
+        QVERIFY2(parseWheel(legacy), qPrintable(error));
+        const ImageIngest::WheelItem lw = batch.wheels.first();
+        QVERIFY(lw.legacyProtocol);
+        QCOMPARE(lw.minValue, 118.5);
+        QCOMPARE(lw.maxValue, 118.5);
+        QCOMPARE(lw.baseValue, 120.0);
+        QVERIFY(std::isnan(lw.deviation));
+        QVERIFY(ImageIngest::recordBatch(db, batch, error));
+        QSqlQuery q(db);
+        QVERIFY(q.exec("SELECT distance, min_value, max_value, dist_norm, deviation, lower_tolerance FROM record WHERE imagename='legacy.png'"));
+        QVERIFY(q.next());
+        QCOMPARE(q.value(0).toDouble(), 118.5);
+        QCOMPARE(q.value(1).toDouble(), 118.5);
+        QCOMPARE(q.value(2).toDouble(), 118.5);
+        QCOMPARE(q.value(3).toDouble(), 120.0);
+        QVERIFY(q.value(4).isNull());
+        QCOMPARE(q.value(5).toDouble(), -1.5);
+        // NG 进入报警缓存，偏差值同样为空
+        QVERIFY(q.exec("SELECT min_value, deviation FROM alertrecord WHERE carrier_id=34 AND wheel_id=9"));
+        QVERIFY(q.next());
+        QCOMPARE(q.value(0).toDouble(), 118.5);
+        QVERIFY(q.value(1).isNull());
+
+        QJsonObject legacyBad = legacy; legacyBad["actualDistance"] = "118.5";
+        QVERIFY(!parseWheel(legacyBad));
+        QVERIFY(error.contains("actualDistance"));
+    }
+    // 驱动轮图片名含小数点、负号和多段下划线：FTP 先到与 TCP 先到两种顺序都按文件名关联
+    void visionExampleImageAssociatesInBothArrivalOrders() {
+        QTemporaryDir dir; QVERIFY(dir.isValid());
+        FtpServer server; QString error; QStringList stored;
+        server.setDateSubdirectories(true);
+        server.uploadHandler = [&](const QString &staged, const QString &target, const QString &) {
+            return ImageIngest::accept(staged, target, [](const QString &) { return true; }, error);
+        };
+        connect(&server, &FtpServer::imageStored, this, [&stored](const QString &path) { stored << path; });
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0, dir.path(), QMap<QString, QString>{{"u", "p"}}));
+        QTcpSocket client; client.connectToHost(QHostAddress::LocalHost, server.port());
+        QVERIFY(reply(client).startsWith("220"));
+        QVERIFY(command(client, "USER u").startsWith("331"));
+        QVERIFY(command(client, "PASS p").startsWith("230"));
+        QImage image(16, 16, QImage::Format_RGB32); image.fill(Qt::gray);
+        QByteArray jpg; QBuffer buffer(&jpg); QVERIFY(buffer.open(QIODevice::WriteOnly)); QVERIFY(image.save(&buffer, "JPG"));
+        auto upload = [&](const QString &name) {
+            const QString epsv = command(client, "EPSV");
+            QTcpSocket data; data.connectToHost(QHostAddress::LocalHost, epsv.section('|', 3, 3).toUShort());
+            if (!data.waitForConnected(3000)) return QString();
+            const QString started = command(client, "STOR " + name.toUtf8());
+            if (!started.startsWith("150")) return started;
+            data.write(jpg); data.flush(); data.disconnectFromHost();
+            return reply(client);
+        };
+
+        // FTP 先到：图片进入待关联缓存，TCP 批次按 imageName（大小写不敏感）取用
+        const QString name = QStringLiteral("CARRIER_34_20261116_142451_cam05_118.6_151.1_155.0_-3.9_OK.jpg");
+        QVERIFY2(upload(name).startsWith("226"), qPrintable(error));
+        QTRY_COMPARE(stored.size(), 1);
+        QCOMPARE(QFileInfo(stored.first()).fileName(), name); // 文件名原样落盘，不截断小数点或负号后的部分
+        IngestCoordinator::PendingImageCache cache;
+        cache.add(name, stored.first(), QDateTime::currentDateTime());
+        ImageIngest::BatchData batch;
+        QJsonObject root = visionExampleBatch();
+        root.remove("timestamp");
+        QVERIFY2(ImageIngest::parseBatchJson(root, batch, error), qPrintable(error));
+        batch.wheels.first().imageName = name.toLower();
+        batch.wheels.first().imagePath = cache.find(batch.wheels.first().imageName);
+        QCOMPARE(batch.wheels.first().imagePath, stored.first());
+        QVERIFY(ImageIngest::recordBatch(db, batch, error));
+        QSqlQuery q(db);
+        QVERIFY(q.exec("SELECT image_path, min_value, max_value, dist_norm, deviation FROM record WHERE wheel_id=9"));
+        QVERIFY(q.next());
+        QCOMPARE(q.value(0).toString(), stored.first());
+        QCOMPARE(q.value(4).toDouble(), -3.893);
+
+        // TCP 先到：记录入库时没有图片，图片到达后按请求文件名补写路径
+        const QString second = QStringLiteral("CARRIER_34_20261116_142520_cam06_-0.5_151.1_155.0_-3.9_NG.jpg");
+        QJsonObject wheel = root.value("wheels").toArray().first().toObject();
+        wheel["wheelId"] = 10; wheel["cameraId"] = 6; wheel["result"] = "NG"; wheel["imageName"] = second;
+        root["wheels"] = QJsonArray{wheel};
+        QVERIFY(ImageIngest::parseBatchJson(root, batch, error));
+        QVERIFY(ImageIngest::recordBatch(db, batch, error));
+        QVERIFY2(upload(second).startsWith("226"), qPrintable(error));
+        QTRY_COMPARE(stored.size(), 2);
+        QCOMPARE(QFileInfo(stored.last()).fileName(), second);
+        QCOMPARE(ImageIngest::linkRecordImage(db, second, stored.last(), QDateTime::currentDateTime().addSecs(-3600), error), 1);
+        QVERIFY(q.exec("SELECT image_path FROM record WHERE wheel_id=10"));
+        QVERIFY(q.next());
+        QCOMPARE(q.value(0).toString(), stored.last());
+        QCOMPARE(ImageIngest::linkRecordImage(db, second, stored.last(), QDateTime::currentDateTime().addSecs(-3600), error), 0);
+
+        // 超过 240 字符的文件名在 FTP 端直接拒收，不会留下无法提交的 .cv-pending 标记
+        QVERIFY(upload(QString(237, u'a') + ".jpg").startsWith("553"));
+    }
+    // 读取存储方式 ZIP 的全部条目，同时校验本地头、中央目录与 CRC 一致
+    static QMap<QString, QByteArray> readStoredZip(const QByteArray &zip) {
+        QMap<QString, QByteArray> files;
+        auto u16 = [&](qsizetype at) { return qFromLittleEndian<quint16>(zip.constData() + at); };
+        auto u32 = [&](qsizetype at) { return qFromLittleEndian<quint32>(zip.constData() + at); };
+        if (zip.size() < 22) return files;
+        const qsizetype eocd = zip.size() - 22;
+        if (u32(eocd) != 0x06054b50u) return files;
+        const int count = u16(eocd + 10);
+        qsizetype cd = u32(eocd + 16);
+        for (int i = 0; i < count; ++i) {
+            if (cd + 46 > zip.size() || u32(cd) != 0x02014b50u) return {};
+            const quint32 crc = u32(cd + 16), size = u32(cd + 20);
+            const quint16 nameLen = u16(cd + 28), extraLen = u16(cd + 30), commentLen = u16(cd + 32);
+            const quint32 local = u32(cd + 42);
+            const QString name = QString::fromUtf8(zip.mid(cd + 46, nameLen));
+            if (u32(local) != 0x04034b50u || u16(local + 8) != 0 || u32(local + 14) != crc) return {};
+            const qsizetype dataAt = local + 30 + u16(local + 26) + u16(local + 28);
+            const QByteArray data = zip.mid(dataAt, size);
+            if (ZipWriter::crc32(data) != crc) return {};
+            files.insert(name, data);
+            cd += 46 + nameLen + extraLen + commentLen;
+        }
+        return files;
+    }
+    void logExportCsvEscapingAndXlsxPackage() {
+        // CRC32 标准校验值
+        QCOMPARE(ZipWriter::crc32(QByteArray("123456789")), 0xCBF43926u);
+        QCOMPARE(ZipWriter::crc32(QByteArray()), 0u);
+
+        // CSV 转义：逗号、引号、换行加引号；公式前缀加 '；负数保持原样
+        QCOMPARE(LogExport::csvField("plain"), QString("plain"));
+        QCOMPARE(LogExport::csvField("a,b"), QString("\"a,b\""));
+        QCOMPARE(LogExport::csvField("say \"hi\""), QString("\"say \"\"hi\"\"\""));
+        QCOMPARE(LogExport::csvField("line1\nline2"), QString("\"line1\nline2\""));
+        QCOMPARE(LogExport::csvField("=HYPERLINK(\"x\")"), QString("\"'=HYPERLINK(\"\"x\"\")\""));
+        QCOMPARE(LogExport::csvField("+1"), QString("'+1"));
+        QCOMPARE(LogExport::csvField("@SUM"), QString("'@SUM"));
+        QCOMPARE(LogExport::csvField("-3.9"), QString("-3.9"));
+        QCOMPARE(LogExport::csvField("-cmd"), QString("'-cmd"));
+
+        // 报警处置日志拆列
+        const QString handled = QStringLiteral("报警处置完成，操作员=张三，架号=12，轮位=3，操作=误报，日期=2026-11-01 至 2026-11-16，更新记录=4");
+        QCOMPARE(LogExport::dispositionColumns(handled),
+                 (QStringList{"报警处置完成", "张三", "12", "3", "误报", "2026-11-01 至 2026-11-16", "4"}));
+        QCOMPARE(LogExport::dispositionColumns(QStringLiteral("报警处置被拒绝，架号=7，轮位=2：请填写处置人员")).value(0),
+                 QStringLiteral("报警处置被拒绝"));
+
+        LogExport::Table table = LogExport::makeTable(true);
+        LogExport::appendLogRow(table, true, "2026-11-16 09:00:00.000", "info", handled);
+        LogExport::appendLogRow(table, true, "2026-11-16 09:05:00.000", "warn",
+                                QStringLiteral("报警处置完成，操作员==1+1 <李四> & \"王五\"，架号=5，轮位=9，操作=已处理（已换轮），日期=2026-11-16 至 2026-11-16，更新记录=1"));
+        QCOMPARE(table.rows.first().size(), table.header.size());
+
+        const QByteArray csv = LogExport::toCsv(table);
+        QVERIFY(csv.startsWith("\xEF\xBB\xBF"));
+        const QStringList lines = QString::fromUtf8(csv.mid(3)).split(QStringLiteral("\r\n"), Qt::SkipEmptyParts);
+        QCOMPARE(lines.size(), 3);
+        QVERIFY(lines.at(0).startsWith(QStringLiteral("时间,级别,事件,操作员,架号,轮位,操作,日期范围,更新记录,内容")));
+        QVERIFY(lines.at(1).startsWith(QStringLiteral("2026-11-16 09:00:00.000,INFO,报警处置完成,张三,12,3,误报,")));
+        QVERIFY(lines.at(2).contains(QStringLiteral(",\"'=1+1 <李四> & \"\"王五\"\"\",")));
+
+        QString error;
+        const QByteArray xlsx = LogExport::toXlsx(table, QStringLiteral("报警处置"), &error);
+        QVERIFY2(!xlsx.isEmpty(), qPrintable(error));
+        const QMap<QString, QByteArray> parts = readStoredZip(xlsx);
+        for (const char *name : {"[Content_Types].xml", "_rels/.rels", "xl/workbook.xml", "xl/_rels/workbook.xml.rels",
+                                 "xl/styles.xml", "xl/worksheets/sheet1.xml"}) {
+            QVERIFY2(parts.contains(QLatin1String(name)), name);
+            QXmlStreamReader xml(parts.value(QLatin1String(name)));
+            while (!xml.atEnd()) xml.readNext();
+            QVERIFY2(!xml.hasError(), qPrintable(QStringLiteral("%1: %2").arg(name, xml.errorString())));
+        }
+        // 单元格内容：特殊字符转义后可原样读回，数值列写为数值
+        QXmlStreamReader sheet(parts.value("xl/worksheets/sheet1.xml"));
+        QMap<QString, QString> cells;
+        QString ref;
+        while (!sheet.atEnd()) {
+            sheet.readNext();
+            if (!sheet.isStartElement()) continue;
+            if (sheet.name() == QLatin1String("c")) ref = sheet.attributes().value("r").toString();
+            else if (sheet.name() == QLatin1String("t") || sheet.name() == QLatin1String("v")) cells.insert(ref, sheet.readElementText());
+        }
+        QCOMPARE(cells.value("A1"), QStringLiteral("时间"));
+        QCOMPARE(cells.value("D2"), QStringLiteral("张三"));
+        QCOMPARE(cells.value("E2"), QStringLiteral("12"));
+        QCOMPARE(cells.value("D3"), QStringLiteral("=1+1 <李四> & \"王五\""));
+        QVERIFY(parts.value("xl/worksheets/sheet1.xml").contains("<c r=\"E2\"><v>12</v></c>"));
+        QVERIFY(parts.value("xl/workbook.xml").contains(QStringLiteral("name=\"报警处置\"").toUtf8()));
+
+        // 写文件后能完整读回
+        QTemporaryDir dir;
+        const QString path = dir.filePath("sub/export.xlsx");
+        QVERIFY2(LogExport::writeFile(path, xlsx, error), qPrintable(error));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        QCOMPARE(file.readAll(), xlsx);
+    }
+    void logExportVisitsAllMatchingRowsAcrossDays() {
+        QTemporaryDir dir;
+        AppLogger::init(dir.path()); AppLogger::shutdown();
+        const QList<QPair<QString, QString>> files{
+            {"carrier_2025-02-01.log", "[2025-02-01 09:00:00.000] [info] 报警处置完成，操作员=甲，架号=1，轮位=1，操作=误报，日期=2025-02-01 至 2025-02-01，更新记录=1\n"
+                                       "[2025-02-01 09:01:00.000] [info] 其他日志\n"},
+            {"carrier_2025-02-02.log", "[2025-02-02 09:00:00.000] [warning] 报警处置被拒绝，架号=2，轮位=3：请填写处置人员\n"},
+        };
+        for (const auto &entry : files) {
+            QFile file(dir.filePath(entry.first));
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            file.write(entry.second.toUtf8());
+        }
+        QStringList times;
+        QVERIFY(AppLogger::forEachLog("2025-02-02", "2025-02-01", "all", "", "alertDisposition",
+            [&](const QString &time, const QString &, const QString &, const QString &) { times << time; return true; }));
+        QCOMPARE(times, (QStringList{"2025-02-01 09:00:00.000", "2025-02-02 09:00:00.000"})); // 按时间正序，不分页
+        times.clear();
+        QVERIFY(AppLogger::forEachLog("2025-02-01", "2025-02-02", "warn", "", "alertDisposition",
+            [&](const QString &time, const QString &, const QString &, const QString &) { times << time; return true; }));
+        QCOMPARE(times.size(), 1);
+        QString error;
+        QVERIFY(!AppLogger::forEachLog("bad", "2025-02-02", "all", "", "all",
+            [](const QString &, const QString &, const QString &, const QString &) { return true; }, &error));
+        QVERIFY(!error.isEmpty());
     }
     void tcpDataReceiverPacketParsing() {
         TcpDataReceiver receiver;
@@ -731,9 +1016,10 @@ private slots:
         QJsonArray wheels;
         QJsonObject w;
         w["wheelId"] = 2;
-        w["actualDistance"] = 11.2;
-        w["baseDistance"] = 10.0;
-        w["lowerTolerance"] = -1.5;
+        w["minValue"] = 11.2;
+        w["maxValue"] = 11.6;
+        w["baseValue"] = 10.0;
+        w["deviation"] = 1.6;
         w["result"] = "OK";
         w["imageName"] = "test_w2.png";
         wheels.append(w);
@@ -749,7 +1035,9 @@ private slots:
         QCOMPARE(receivedBatch.carrierId, 3);
         QCOMPARE(receivedBatch.wheels.size(), 1);
         QCOMPARE(receivedBatch.wheels[0].wheelId, 2);
-        QCOMPARE(receivedBatch.wheels[0].actualDistance, 11.2);
+        QCOMPARE(receivedBatch.wheels[0].minValue, 11.2);
+        QCOMPARE(receivedBatch.wheels[0].maxValue, 11.6);
+        QCOMPARE(receivedBatch.wheels[0].deviation, 1.6);
 
         receiver.stop();
     }

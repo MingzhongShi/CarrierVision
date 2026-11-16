@@ -9,6 +9,12 @@
 
 namespace {
 
+// 缺失的测量值（NaN）以空值交给 QML，界面统一显示占位符
+QVariant measureValue(double value)
+{
+    return std::isfinite(value) ? QVariant(value) : QVariant();
+}
+
 bool imageItemEquals(const ImageItem &a, const ImageItem &b)
 {
     return a.batchId == b.batchId
@@ -22,9 +28,10 @@ bool imageItemEquals(const ImageItem &a, const ImageItem &b)
            && a.fileUrl == b.fileUrl
            && a.receivedAt == b.receivedAt
            && a.result == b.result
-           && qFuzzyCompare(a.distance, b.distance)
-           && qFuzzyCompare(a.dist_norm, b.dist_norm)
-           && qFuzzyCompare(a.lower_tolerance, b.lower_tolerance)
+           && ImageItemObject::sameMeasure(a.min_value, b.min_value)
+           && ImageItemObject::sameMeasure(a.max_value, b.max_value)
+           && ImageItemObject::sameMeasure(a.dist_norm, b.dist_norm)
+           && ImageItemObject::sameMeasure(a.deviation, b.deviation)
            && a.wheelsInfo == b.wheelsInfo;
 }
 
@@ -42,9 +49,10 @@ void syncObjectFromItem(ImageItemObject *o, const ImageItem &it)
     o->setReceivedAtText(AgcUtils::formatDateTime(it.receivedAt));
     o->setSerial(it.serial);
     o->setResult(it.result);
-    o->setDistance(it.distance);
-    o->setDistNorm(it.dist_norm);
-    o->setLowerTolerance(it.lower_tolerance);
+    o->setMinValue(it.min_value);
+    o->setMaxValue(it.max_value);
+    o->setBaseValue(it.dist_norm);
+    o->setDeviation(it.deviation);
     o->setWheelsInfo(it.wheelsInfo);
 }
 
@@ -100,15 +108,14 @@ QVariant ImageListModel::data(const QModelIndex &index, int role) const
     }
     case ResultRole:
         return item.result;
-    case DistanceRole:
-        return item.distance;
-    case DistMaxRole:
-        return item.dist_max;
-    case DistNormRole:
-        return item.dist_norm;
-    case LowerToleranceRole:
-    case LowerToleranceSnakeRole:
-        return item.lower_tolerance;
+    case MinValueRole:
+        return measureValue(item.min_value);
+    case MaxValueRole:
+        return measureValue(item.max_value);
+    case BaseValueRole:
+        return measureValue(item.dist_norm);
+    case DeviationRole:
+        return measureValue(item.deviation);
     case WheelsInfoRole:
         return item.wheelsInfo;
     case ReceivedAtRole:
@@ -134,15 +141,14 @@ QHash<int, QByteArray> ImageListModel::roleNames() const
         {FileNameRole, "fileName"},
         {FilePathRole, "filePath"},
         {FileUrlRole, "fileUrl"},
-        {DistMaxRole, "dist_max"},
-        {DistNormRole, "dist_norm"},
-        {LowerToleranceRole, "lowerTolerance"},
-        {LowerToleranceSnakeRole, "lower_tolerance"},
+        {MinValueRole, "minValue"},
+        {MaxValueRole, "maxValue"},
+        {BaseValueRole, "baseValue"},
+        {DeviationRole, "deviation"},
         {WheelsInfoRole, "wheelsInfo"},
         {ItemObjectRole, "itemObject"},
         {ReceivedAtRole, "receivedAt"},
         {ResultRole, "result"},
-        {DistanceRole, "distance"},
         {ReceivedAtTextRole, "receivedAtText"}
     };
 }
@@ -271,10 +277,10 @@ QVariantMap ImageListModel::get(int index) const
         {QStringLiteral("filePath"), item.filePath},
         {QStringLiteral("fileUrl"), item.fileUrl.isEmpty() ? QUrl::fromLocalFile(item.filePath).toString() : item.fileUrl},
         {QStringLiteral("result"), item.result},
-        {QStringLiteral("distance"), item.distance},
-        {QStringLiteral("dist_norm"), item.dist_norm},
-        {QStringLiteral("lowerTolerance"), item.lower_tolerance},
-        {QStringLiteral("lower_tolerance"), item.lower_tolerance},
+        {QStringLiteral("minValue"), measureValue(item.min_value)},
+        {QStringLiteral("maxValue"), measureValue(item.max_value)},
+        {QStringLiteral("baseValue"), measureValue(item.dist_norm)},
+        {QStringLiteral("deviation"), measureValue(item.deviation)},
         {QStringLiteral("wheelsInfo"), item.wheelsInfo},
         {QStringLiteral("receivedAt"), item.receivedAt.toString(Qt::ISODateWithMs)},
         {QStringLiteral("receivedAtText"), AgcUtils::formatDateTime(item.receivedAt)}

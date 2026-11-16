@@ -2,6 +2,8 @@
 
 #include <QObject>
 #include <QDateTime>
+#include <cmath>
+#include <limits>
 
 class ImageItemObject : public QObject
 {
@@ -19,9 +21,11 @@ class ImageItemObject : public QObject
     Q_PROPERTY(QString fileUrl READ fileUrl WRITE setFileUrl NOTIFY fileUrlChanged)
     Q_PROPERTY(QString receivedAtText READ receivedAtText WRITE setReceivedAtText NOTIFY receivedAtTextChanged)
     Q_PROPERTY(int result READ result WRITE setResult NOTIFY resultChanged)
-    Q_PROPERTY(double distance READ distance WRITE setDistance NOTIFY distanceChanged)
-    Q_PROPERTY(double distNorm READ distNorm WRITE setDistNorm NOTIFY distNormChanged)
-    Q_PROPERTY(double lowerTolerance READ lowerTolerance WRITE setLowerTolerance NOTIFY lowerToleranceChanged)
+    // 测量值缺失（旧记录的偏差值）时为 NaN，QML 中用 isNaN 判断后显示占位符
+    Q_PROPERTY(double minValue READ minValue WRITE setMinValue NOTIFY minValueChanged)
+    Q_PROPERTY(double maxValue READ maxValue WRITE setMaxValue NOTIFY maxValueChanged)
+    Q_PROPERTY(double baseValue READ baseValue WRITE setBaseValue NOTIFY baseValueChanged)
+    Q_PROPERTY(double deviation READ deviation WRITE setDeviation NOTIFY deviationChanged)
     Q_PROPERTY(QString wheelsInfo READ wheelsInfo WRITE setWheelsInfo NOTIFY wheelsInfoChanged)
 
 public:
@@ -66,14 +70,20 @@ public:
     int result() const { return m_result; }
     void setResult(int v) { if (m_result == v) return; m_result = v; emit resultChanged(); }
 
-    double distance() const { return m_distance; }
-    void setDistance(double v) { if (qFuzzyCompare(m_distance, v)) return; m_distance = v; emit distanceChanged(); }
+    // NaN 与 NaN 视为相同，避免缺失值每次同步都发出变更信号
+    static bool sameMeasure(double a, double b) { return (std::isnan(a) && std::isnan(b)) || a == b; }
 
-    double distNorm() const { return m_distNorm; }
-    void setDistNorm(double v) { if (qFuzzyCompare(m_distNorm, v)) return; m_distNorm = v; emit distNormChanged(); }
+    double minValue() const { return m_minValue; }
+    void setMinValue(double v) { if (sameMeasure(m_minValue, v)) return; m_minValue = v; emit minValueChanged(); }
 
-    double lowerTolerance() const { return m_lowerTolerance; }
-    void setLowerTolerance(double v) { if (qFuzzyCompare(m_lowerTolerance, v)) return; m_lowerTolerance = v; emit lowerToleranceChanged(); }
+    double maxValue() const { return m_maxValue; }
+    void setMaxValue(double v) { if (sameMeasure(m_maxValue, v)) return; m_maxValue = v; emit maxValueChanged(); }
+
+    double baseValue() const { return m_baseValue; }
+    void setBaseValue(double v) { if (sameMeasure(m_baseValue, v)) return; m_baseValue = v; emit baseValueChanged(); }
+
+    double deviation() const { return m_deviation; }
+    void setDeviation(double v) { if (sameMeasure(m_deviation, v)) return; m_deviation = v; emit deviationChanged(); }
 
     QString wheelsInfo() const { return m_wheelsInfo; }
     void setWheelsInfo(const QString &v) { if (m_wheelsInfo == v) return; m_wheelsInfo = v; emit wheelsInfoChanged(); }
@@ -90,9 +100,10 @@ signals:
     void fileUrlChanged();
     void receivedAtTextChanged();
     void resultChanged();
-    void distanceChanged();
-    void distNormChanged();
-    void lowerToleranceChanged();
+    void minValueChanged();
+    void maxValueChanged();
+    void baseValueChanged();
+    void deviationChanged();
     void wheelsInfoChanged();
 
 private:
@@ -107,8 +118,9 @@ private:
     QString m_fileUrl;
     QString m_receivedAtText;
     int m_result = 1;
-    double m_distance = 0.0;
-    double m_distNorm = 0.0;
-    double m_lowerTolerance = 0.0;
+    double m_minValue = std::numeric_limits<double>::quiet_NaN();
+    double m_maxValue = std::numeric_limits<double>::quiet_NaN();
+    double m_baseValue = std::numeric_limits<double>::quiet_NaN();
+    double m_deviation = std::numeric_limits<double>::quiet_NaN();
     QString m_wheelsInfo;
 };

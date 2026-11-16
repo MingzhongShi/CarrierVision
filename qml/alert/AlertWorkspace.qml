@@ -5,6 +5,7 @@ import "../common"
 
 Item {
     id: root
+    objectName: "alertWorkspace"
     anchors.fill: parent
 
     // ========== 报警中心二级导航 ==========

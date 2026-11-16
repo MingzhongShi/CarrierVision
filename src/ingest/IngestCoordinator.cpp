@@ -73,14 +73,16 @@ QVector<ImageItem> buildStationCards(const ImageIngest::BatchData &batch,
         if (card.fileName.isEmpty()) {
             card.fileName = wheel.imageName;
             card.wheelId = wheel.wheelId;
-            card.distance = wheel.actualDistance;
-            card.dist_norm = wheel.baseDistance;
-            card.lower_tolerance = wheel.lowerTolerance;
+            card.min_value = wheel.minValue;
+            card.max_value = wheel.maxValue;
+            card.dist_norm = wheel.baseValue;
+            card.deviation = wheel.deviation;
         }
 
-        const QString description = QStringLiteral("%1: %2mm (%3)")
+        const QString description = QStringLiteral("%1: %2~%3mm (%4)")
                                         .arg(WheelIdentity::label(wheel.wheelId))
-                                        .arg(wheel.actualDistance, 0, 'f', 1)
+                                        .arg(wheel.minValue, 0, 'f', 1)
+                                        .arg(wheel.maxValue, 0, 'f', 1)
                                         .arg(wheel.result ? "OK" : "NG");
         card.wheelsInfo = card.wheelsInfo.isEmpty() ? description
                                                     : card.wheelsInfo + QStringLiteral(" · ") + description;

@@ -6,6 +6,7 @@
 #include "common/WheelIdentity.h"
 #include "data/WeeklyReport.h"
 #include <limits>
+#include <cmath>
 #include "data/DbSchema.h"
 #include "app/ImageListModel.h"
 #include "data/StatsService.h"
@@ -159,6 +160,79 @@ private slots:
             QVERIFY(!q.exec("UPDATE record SET is_handled=0,is_false_alarm=1 WHERE is_handled=1"));
             QVERIFY(q.exec("SELECT COUNT(*) FROM alertrecord WHERE result=0"));
             QVERIFY(q.next()); QCOMPARE(q.value(0).toInt(), 0); // 新插入的旧时间 NG 不替换最新检测，人工处置也不改缓存
+        }
+        QSqlDatabase::removeDatabase(connection);
+    }
+
+    // 视觉端新报文的最小/最大实测与偏差值：旧库原地加列，旧行最小/最大回退到 distance、偏差值为空；
+    // 新的 NG 记录经触发器把三列一起带进 alertrecord
+    void measurementColumnsMigrateInPlaceAndFeedAlerts()
+    {
+        const QString connection = QStringLiteral("MeasurementMigrationTest");
+        {
+            QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE", connection);
+            db.setDatabaseName(":memory:");
+            QVERIFY(db.open());
+            QSqlQuery q(db);
+            QVERIFY(q.exec("CREATE TABLE record(createtime DATETIME NOT NULL, carrier_id INTEGER NOT NULL, "
+                           "camera_id INTEGER NOT NULL DEFAULT 1, wheel_id INTEGER NOT NULL, result INTEGER, "
+                           "distance REAL NOT NULL DEFAULT 0, dist_norm REAL NOT NULL DEFAULT 0, "
+                           "lower_tolerance REAL NOT NULL DEFAULT 0, imagename TEXT NOT NULL, batch_id TEXT DEFAULT '', "
+                           "image_path TEXT)"));
+            QVERIFY(q.exec("CREATE TABLE alertrecord(createtime DATETIME NOT NULL, carrier_id INTEGER NOT NULL, "
+                           "camera_id INTEGER NOT NULL DEFAULT 1, wheel_id INTEGER NOT NULL, result INTEGER, "
+                           "distance REAL NOT NULL DEFAULT 0, dist_norm REAL NOT NULL DEFAULT 0, "
+                           "lower_tolerance REAL NOT NULL DEFAULT 0, imagename TEXT NOT NULL, UNIQUE(carrier_id, wheel_id))"));
+            QVERIFY(q.exec("INSERT INTO record(createtime,carrier_id,wheel_id,result,distance,dist_norm,imagename) "
+                           "VALUES('2026-11-01 08:00:00',7,9,1,117.8,120.0,'old.jpg')"));
+            QVERIFY(q.exec("INSERT INTO alertrecord(createtime,carrier_id,wheel_id,result,distance,dist_norm,imagename) "
+                           "VALUES('2026-11-01 08:00:00',7,10,0,110.5,120.0,'old-ng.jpg')"));
+            QVERIFY(DBSchema::ensureAllTables(db));
+            QVERIFY(DBSchema::ensureAllTables(db)); // 重复启动不重复加列
+
+            for (const QString &table : {QStringLiteral("record"), QStringLiteral("alertrecord")}) {
+                QStringList columns;
+                QVERIFY(q.exec(QStringLiteral("PRAGMA table_info(%1)").arg(table)));
+                while (q.next()) columns << q.value(1).toString();
+                QVERIFY2(columns.contains("min_value") && columns.contains("max_value") && columns.contains("deviation"),
+                         qPrintable(table));
+            }
+
+            const auto page = [&](const QString &table) {
+                int total = 0;
+                QVector<ImageItem> items;
+                const auto filter = SearchService::buildRecordFilter(QStringLiteral("2026-11-01"), QStringLiteral("2026-11-30"), 7, QString());
+                if (!SearchService::queryRecordPage(db, table, filter, 1, 10, QString(), QString(), total, items)) return QVector<ImageItem>();
+                return items;
+            };
+            QVector<ImageItem> items = page(QStringLiteral("record"));
+            QCOMPARE(items.size(), 1);
+            QCOMPARE(items.first().min_value, 117.8);
+            QCOMPARE(items.first().max_value, 117.8);
+            QCOMPARE(items.first().dist_norm, 120.0);
+            QVERIFY(std::isnan(items.first().deviation)); // 旧行没有偏差值，界面显示为占位符
+            items = page(QStringLiteral("alertrecord"));
+            QCOMPARE(items.size(), 1);
+            QCOMPARE(items.first().min_value, 110.5);
+            QVERIFY(std::isnan(items.first().deviation));
+
+            // 新 NG 记录：触发器复制最小/最大/偏差值；同轮位再次 NG 时更新
+            QVERIFY(q.exec("INSERT INTO record(createtime,carrier_id,wheel_id,result,distance,dist_norm,imagename,min_value,max_value,deviation) "
+                           "VALUES('2026-11-16 14:24:51',7,10,0,118.632,155.0,'new-ng.jpg',118.632,151.107,-3.893)"));
+            QVERIFY(q.exec("SELECT min_value,max_value,deviation,dist_norm,imagename FROM alertrecord WHERE carrier_id=7 AND wheel_id=10"));
+            QVERIFY(q.next());
+            QCOMPARE(q.value(0).toDouble(), 118.632);
+            QCOMPARE(q.value(1).toDouble(), 151.107);
+            QCOMPARE(q.value(2).toDouble(), -3.893);
+            QCOMPARE(q.value(3).toDouble(), 155.0);
+            QCOMPARE(q.value(4).toString(), QStringLiteral("new-ng.jpg"));
+            QVERIFY(q.exec("INSERT INTO record(createtime,carrier_id,wheel_id,result,distance,dist_norm,imagename,min_value,max_value,deviation) "
+                           "VALUES('2026-11-16 15:00:00',7,10,0,117.0,155.0,'newer-ng.jpg',117.0,150.0,-5.0)"));
+            items = page(QStringLiteral("alertrecord"));
+            QCOMPARE(items.size(), 1);
+            QCOMPARE(items.first().min_value, 117.0);
+            QCOMPARE(items.first().max_value, 150.0);
+            QCOMPARE(items.first().deviation, -5.0);
         }
         QSqlDatabase::removeDatabase(connection);
     }
@@ -753,7 +827,8 @@ private slots:
             item.wheelId = wheelId;
             item.cameraId = cameraId;
             item.result = result;
-            item.actualDistance = 120.0 + wheelId;
+            item.minValue = 120.0 + wheelId;
+            item.maxValue = 130.0 + wheelId;
             item.imageName = image;
             return item;
         };
@@ -767,7 +842,7 @@ private slots:
         QCOMPARE(cards.size(), 12);
         QCOMPARE(cards.at(0).result, 0);                 // 同一相机任一轮 NG 则整卡 NG
         QCOMPARE(cards.at(0).wheelId, 1);                // 卡片取该相机第一条轮数据
-        QCOMPARE(cards.at(0).wheelsInfo, QStringLiteral("轮位1/走行轮1: 121.0mm (OK) · 轮位2/走行轮2: 122.0mm (NG)"));
+        QCOMPARE(cards.at(0).wheelsInfo, QStringLiteral("轮位1/走行轮1: 121.0~131.0mm (OK) · 轮位2/走行轮2: 122.0~132.0mm (NG)"));
         QVERIFY(cards.at(0).filePath.isEmpty());
         QCOMPARE(cards.at(1).result, 1);
         QCOMPARE(cards.at(1).filePath, dir.filePath(QStringLiteral("Cam01.PNG")));

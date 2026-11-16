@@ -15,6 +15,9 @@ QString toAppRelativePath(const QString &path);
 QString formatDateTime(const QDateTime &dateTime);
 QDateTime parseFlexibleDateTime(const QString &text, bool endOfDay = false);
 bool isImageFile(const QString &fileName);
+// 图片文件名长度上限：NTFS 单个路径分量最多 255 字符，FTP 提交时还会在文件名后追加
+// ".cv-pending"（11 字符）恢复标记，并可能追加 "_vN" 防重名后缀，故留出余量取 240
+constexpr int kMaxImageNameLength = 240;
 QString makeBatchId(int roundNumber, const QDateTime &receivedAt);
 QString safeNamePart(const QString &input);
 QString encodePassword(const QString &password);

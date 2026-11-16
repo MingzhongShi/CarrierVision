@@ -25,26 +25,28 @@ CarrierVision 是专为工业自动化生产线设计的载具轮位视觉检测
 ```json
 {
   "requestId": "52fa1f4e-59e8-4cb8-813c-cd315f26fc49",
-  "carrierId": 3,
-  "timestamp": "20260912_143005",
+  "carrierId": 34,
+  "timestamp": "20261116_142451",
   "wheels": [
+    {
+      "wheelId": 9,
+      "cameraId": 5,
+      "minValue": 118.632,
+      "maxValue": 151.107,
+      "baseValue": 155.000,
+      "deviation": -3.893,
+      "result": "OK",
+      "imageName": "CARRIER_34_20261116_142451_cam05_118.6_151.1_155.0_-3.9_OK.jpg"
+    },
     {
       "wheelId": 1,
       "cameraId": 1,
-      "actualDistance": 125.4,
-      "baseDistance": 120.0,
-      "lowerTolerance": -2.0,
-      "result": "OK",
-      "imageName": "CARRIER_3_20260912_143005_cam01.png"
-    },
-    {
-      "wheelId": 2,
-      "cameraId": 1,
-      "actualDistance": 117.8,
-      "baseDistance": 120.0,
-      "lowerTolerance": -2.0,
+      "minValue": 117.8,
+      "maxValue": 118.4,
+      "baseValue": 120.0,
+      "deviation": -1.6,
       "result": "NG",
-      "imageName": "CARRIER_3_20260912_143005_cam01.png"
+      "imageName": "CARRIER_34_20261116_142451_cam01.jpg"
     }
   ]
 }
@@ -66,11 +68,18 @@ CarrierVision 是专为工业自动化生产线设计的载具轮位视觉检测
 | :--- | :--- | :---: | :--- | :--- |
 | `wheelId` | int | 是 | `1 ~ 16` | 轮位，1～8 为走行轮，9～16 为驱动轮；界面按同一轮位显示，见下表 |
 | `cameraId` | int | 否 | `1 ~ 12`（默认 1） | 对应工位相机号（同一批次内 `cameraId:wheelId` 唯一） |
-| `actualDistance` | double | 是 | 有限数值 | 实测轮间距 (mm) |
-| `baseDistance` | double | 是 | 有限数值 | 基准理论间距 (mm) |
-| `lowerTolerance` | double | 是 | 有限数值 | 下公差 (mm)，如 `-2.0` |
+| `minValue` | number | 是 | 有限数值 | 最小实测值 (mm) |
+| `maxValue` | number | 是 | 有限数值 | 最大实测值 (mm) |
+| `baseValue` | number | 是 | 有限数值 | 基准值 (mm) |
+| `deviation` | number | 是 | 有限数值 | 偏差值 (mm) = `maxValue - baseValue`，由视觉端计算；服务端按上报值原样保存，不重算 |
 | `result` | string / int | 是 | `"OK"`/`"NG"` 或 `1`/`0` | 检测判定结果（任一轮 NG 即触发报警） |
-| `imageName` | string | 是 | 最长 512 字符，图片扩展名 | 关联的图像文件名（须与 FTP 上传文件名一致）。只应填写文件名；若带路径（如 `D:\cam\a.png`），服务端只取文件名并记录告警；为空、以 `.` 开头或不是图片扩展名时拒收 |
+| `imageName` | string | 是 | 最长 512 字符；文件名部分不超过 240 字符，图片扩展名 | 关联的图像文件名（须与 FTP 上传文件名一致）。只应填写文件名；若带路径（如 `D:\cam\a.png`），服务端只取文件名并记录告警；为空、以 `.` 开头、不是图片扩展名或文件名超过 240 字符时拒收 |
+
+四个测量字段必须是 JSON 数值（不能是字符串或 `null`），缺任一字段时整条报文拒收，错误应答指明缺少的字段，例如 `轮 9: 缺少字段 deviation`。界面按两位小数显示，数据库保存上报的原值。
+
+**旧协议过渡兼容**：升级前的视觉端发送 `actualDistance` / `baseDistance` / `lowerTolerance`。某个轮项完全没有四个新字段而带 `actualDistance` 时，服务端仍然接收：最小值 = 最大值 = `actualDistance`，基准值 = `baseDistance`，偏差值为空（界面显示“—”），并在日志中告警“使用旧协议字段”。只带部分新字段的轮项按新协议校验并拒收。视觉端应尽快升级到新字段，该兼容将在全部现场升级后移除。
+
+**入库与历史数据**：`record` / `alertrecord` 增加 `min_value`、`max_value`、`deviation` 三列（升级时自动加列，不回填旧数据）；基准值写入原有的 `dist_norm`，`distance` 继续写入最小值，供旧的读取方使用。升级前的记录在界面上最小 / 最大实测都显示为原来的实测间距，偏差值显示为“—”。
 
 #### 轮位与轮系
 
@@ -137,11 +146,15 @@ CarrierVision 是专为工业自动化生产线设计的载具轮位视觉检测
 - **多轮共图**：一个相机拍摄覆盖多个轮时，TCP 报文中的多个轮直接指定同一个 `imageName`，FTP 仅需上传一张图片。
 - **推荐命名规范**：
   ```text
-  CARRIER_{carrierId}_{timestamp}_cam{cameraId:02d}.png
+  走行轮（轮位 1～8）：CARRIER_{架号}_{时间}_cam{相机号:02d}.jpg
+  驱动轮（轮位 9～16）：CARRIER_{架号}_{时间}_cam{相机号:02d}_{最小值}_{最大值}_{基准}_{偏差}_{结果}.jpg
   ```
   **示例**：
-  - 载具 3、相机 1：`CARRIER_3_20260912_143005_cam01.png`
-  - 载具 3、相机 2：`CARRIER_3_20260912_143005_cam02.png`
+  - 载具 34、相机 1（走行轮）：`CARRIER_34_20261116_142451_cam01.jpg`
+  - 载具 34、相机 5（驱动轮）：`CARRIER_34_20261116_142451_cam05_118.6_151.1_155.0_-3.9_OK.jpg`
+
+  驱动轮文件名中的测量值只为便于人工辨认，服务端不解析，测量值以 TCP 报文为准。文件名中的 `.`、负号 `-` 和多段 `_` 都按普通字符参与匹配。
+- **文件名长度**：Windows（NTFS）单个文件名最长 255 字符，服务端提交上传时还会临时追加 `.cv-pending`（11 字符），同名不同内容时追加 `_v2` 等后缀，因此**文件名（含扩展名）不得超过 240 字符**。超长的文件名在 FTP `STOR` 时返回 `553 File name too long.`，在 TCP `imageName` 中则整条报文拒收，并在日志中记录“文件名过长”。数据查询与报警记录中较长的文件名中间省略显示，鼠标悬停可查看完整文件名。
 
 ---
 
@@ -153,7 +166,7 @@ import socket, json, ftplib, time
 
 HOST, FTP_PORT, TCP_PORT = "127.0.0.1", 21, 9000
 TIMESTAMP = time.strftime("%Y%m%d_%H%M%S")  # 须接近服务器时间（不超前 10 分钟、不早于保留期）
-IMAGE_NAME = f"CARRIER_3_{TIMESTAMP}_cam01.png"
+IMAGE_NAME = f"CARRIER_3_{TIMESTAMP}_cam01.png"  # 驱动轮可在相机号后追加 _最小值_最大值_基准_偏差_结果
 
 # 1. 上传图片至 FTP
 ftp = ftplib.FTP()
@@ -169,8 +182,8 @@ payload = {
     "carrierId": 3,
     "timestamp": TIMESTAMP,
     "wheels": [
-        {"wheelId": 1, "cameraId": 1, "actualDistance": 125.4, "baseDistance": 120.0, "lowerTolerance": -2.0, "result": "OK", "imageName": IMAGE_NAME},
-        {"wheelId": 2, "cameraId": 1, "actualDistance": 117.8, "baseDistance": 120.0, "lowerTolerance": -2.0, "result": "NG", "imageName": IMAGE_NAME}
+        {"wheelId": 1, "cameraId": 1, "minValue": 124.9, "maxValue": 125.4, "baseValue": 120.0, "deviation": 5.4, "result": "OK", "imageName": IMAGE_NAME},
+        {"wheelId": 2, "cameraId": 1, "minValue": 117.2, "maxValue": 117.8, "baseValue": 120.0, "deviation": -2.2, "result": "NG", "imageName": IMAGE_NAME}
     ]
 }
 
@@ -182,7 +195,7 @@ with socket.create_connection((HOST, TCP_PORT), timeout=5) as s:
 
 ### Netcat 命令行测试
 ```bash
-echo '{"carrierId":1,"wheels":[{"wheelId":1,"actualDistance":10.5,"baseDistance":10.0,"lowerTolerance":-2.0,"result":"OK","imageName":"sample.png"}]}' | nc -N 127.0.0.1 9000
+echo '{"carrierId":1,"wheels":[{"wheelId":1,"minValue":10.2,"maxValue":10.5,"baseValue":10.0,"deviation":0.5,"result":"OK","imageName":"sample.png"}]}' | nc -N 127.0.0.1 9000
 ```
 
 ---
@@ -273,6 +286,10 @@ python3 scripts/simulator.py --interval 5 --duration 72h --fault-rate 0.05 --pid
 操作仅覆盖当前已查询日期范围内、相同架号和原始轮号的未处置 NG 记录。`record.is_handled` 和 `record.is_false_alarm` 为独立于检测结果的人工处置字段（默认 0），两种处置互斥且已处置记录不可重复修改。新收到的记录默认未处置。升级时自动为现有数据库加列，无需删库。人工处置不修改客户端的 `result`、测量值、图片或原有 NG 统计，也不更改最新检测报警缓存。
 
 右侧异常原图按时间倒序逐张浏览，支持上一幅、下一幅及点击放大；同一落盘图片不区分大小写去重，同名的不同落盘版本分别展示。已处置记录仍可查看，图片尚未到达或文件缺失时显示提示。图像分页没有 200 条上限。
+
+确认「已处理」或「误报」时须填写处置人员：可从“系统设置 → 报警处置”预设的名单中下拉选择，也可直接输入名单外的姓名（最长 32 字符，空白自动折叠）；为空时提示“请填写处置人员”并不提交。上次使用的姓名自动带出。每次处置都以“报警处置完成，操作员=…，架号=…，轮位=…，操作=…，日期=… 至 …，更新记录=…”写入日志。
+
+日志查询选择“日志类型 = 报警处置”时可「导出」为 Excel（.xlsx）或 CSV（UTF-8 带 BOM，Excel 可直接打开）。导出内容为当前日期范围、级别、关键字下的**全部**处置记录（不只是当前页），按时间正序，列为：时间、级别、事件、操作员、架号、轮位、操作、日期范围、更新记录、内容（日志原文）。导出在后台线程执行，完成后可直接打开所在文件夹。CSV 中以 `=`、`+`、`@` 等开头的文本会加 `'` 前缀，防止被 Excel 当作公式。
 
 ---
 
