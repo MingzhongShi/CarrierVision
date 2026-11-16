@@ -1000,7 +1000,7 @@ Item {
 
                     ParamHeader {
                         title: "保留期限"
-                        description: "超过期限的检测图片、对应记录和运行日志自动清理。范围 1～3650 天，修改后立即保存。"
+                        description: "超过期限的检测图片、对应记录和运行日志自动清理（默认 90 天）。范围 1～3650 天，修改后立即保存。"
                     }
                     ParamValue {
                         UnitLabel { text: "图片与记录" }
@@ -1045,6 +1045,157 @@ Item {
                                 if (appController)
                                     appController.setCleanupRunHour(currentIndex);
                             }
+                        }
+                        Item { Layout.fillWidth: true }
+                    }
+
+                    RowDivider {}
+
+                    ParamHeader {
+                        title: "过期记录归档"
+                        description: "清理前把过期的检测记录按月份追加到 CSV（data/archive/record_年-月.csv），可用 Excel 打开。图片不归档。"
+                    }
+                    ParamValue {
+                        Combo {
+                            Layout.preferredWidth: 150
+                            model: ["归档后删除", "直接删除"]
+                            currentIndex: appController && appController.cleanupArchiveCsv() ? 0 : 1
+                            onActivated: {
+                                if (appController)
+                                    appController.setCleanupArchiveCsv(currentIndex === 0);
+                            }
+                        }
+                        ActionButton {
+                            Layout.preferredHeight: 36
+                            text: "打开归档目录"
+                            variant: "secondary"
+                            onClicked: {
+                                if (appController)
+                                    appController.openCsvArchiveDirectory();
+                            }
+                        }
+                        Item { Layout.fillWidth: true }
+                    }
+                }
+
+                // ---------- 数据库状态 ----------
+                Section {
+                    id: dbSection
+                    title: "数据库状态"
+                    description: "每日清理后自动回收删除记录释放的空间，并把预写日志（WAL）写回主库。"
+
+                    property var info: ({})
+                    property int requestId: -1
+                    property bool loading: false
+
+                    function refresh() {
+                        if (!appController || !appController.requestStats)
+                            return;
+                        loading = true;
+                        requestId = appController.requestStats("databaseInfo", []);
+                    }
+                    function mb(bytes) {
+                        return bytes === undefined ? "-" : (Number(bytes) / 1048576).toFixed(1) + " MB";
+                    }
+                    function count(value) {
+                        return value === undefined ? "-" : Number(value).toLocaleString(Qt.locale("zh_CN"), "f", 0);
+                    }
+
+                    Component.onCompleted: refresh()
+
+                    Connections {
+                        target: appController
+                        function onStatsReady(requestId, kind, result) {
+                            if (requestId !== dbSection.requestId)
+                                return;
+                            dbSection.loading = false;
+                            dbSection.info = result || ({});
+                        }
+                    }
+
+                    headerExtras: [
+                        ActionButton {
+                            Layout.preferredHeight: 32
+                            text: dbSection.loading ? "读取中" : "刷新"
+                            variant: "secondary"
+                            enabled: !dbSection.loading
+                            onClicked: dbSection.refresh()
+                        }
+                    ]
+
+                    ParamHeader {
+                        title: "数据库文件"
+                        description: "data/dataAgc.db 与预写日志；备份每天一份，保留最近 3 份。"
+                    }
+                    ParamValue {
+                        UnitLabel {
+                            font.features: Theme.fontFeaturesTabular
+                            text: "主库 " + dbSection.mb(dbSection.info.fileBytes)
+                                  + "　WAL " + dbSection.mb(dbSection.info.walBytes)
+                                  + "　备份 " + (dbSection.info.backupCount === undefined ? "-" : dbSection.info.backupCount) + " 份 / "
+                                  + dbSection.mb(dbSection.info.backupBytes)
+                        }
+                        Item { Layout.fillWidth: true }
+                    }
+
+                    RowDivider {}
+
+                    ParamHeader {
+                        title: "检测记录"
+                        description: "库内记录数与时间范围。"
+                    }
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        Layout.alignment: Qt.AlignLeft | Qt.AlignTop
+                        spacing: Theme.space1
+                        UnitLabel {
+                            font.features: Theme.fontFeaturesTabular
+                            text: "共 " + dbSection.count(dbSection.info.recordCount) + " 条，近 24 小时 "
+                                  + dbSection.count(dbSection.info.recordsLastDay) + " 条"
+                        }
+                        HintLabel {
+                            font.features: Theme.fontFeaturesTabular
+                            text: dbSection.info.oldestRecord
+                                  ? ("最早 " + dbSection.info.oldestRecord + "　最新 " + dbSection.info.newestRecord)
+                                  : "暂无记录"
+                        }
+                    }
+
+                    RowDivider {}
+
+                    ParamHeader {
+                        title: "空闲页"
+                        description: "删除记录后留下的空闲空间。增量回收模式下每日清理时归还磁盘。"
+                    }
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        Layout.alignment: Qt.AlignLeft | Qt.AlignTop
+                        spacing: Theme.space1
+                        UnitLabel {
+                            font.features: Theme.fontFeaturesTabular
+                            text: dbSection.info.pageCount === undefined ? "-"
+                                  : (dbSection.count(dbSection.info.freePages) + " / " + dbSection.count(dbSection.info.pageCount)
+                                     + " 页（" + Number(dbSection.info.freePercent).toFixed(1) + "%）")
+                        }
+                        HintLabel {
+                            text: dbSection.info.autoVacuum === "incremental" ? "空间回收：增量回收，每日清理后执行"
+                                  : (dbSection.info.autoVacuum === undefined ? ""
+                                     : "空间回收：未启用（库超过 512 MB 时启动不自动转换，空闲空间由新数据复用）")
+                        }
+                    }
+
+                    RowDivider {}
+
+                    ParamHeader {
+                        title: "CSV 归档"
+                        description: "已归档的过期记录，按月一个文件。"
+                    }
+                    ParamValue {
+                        UnitLabel {
+                            font.features: Theme.fontFeaturesTabular
+                            text: (dbSection.info.archiveFiles === undefined ? "-" : dbSection.info.archiveFiles) + " 个文件，"
+                                  + dbSection.mb(dbSection.info.archiveBytes)
+                                  + (dbSection.info.oldestArchiveMonth ? "，最早 " + dbSection.info.oldestArchiveMonth : "")
                         }
                         Item { Layout.fillWidth: true }
                     }

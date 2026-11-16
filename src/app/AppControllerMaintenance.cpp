@@ -87,6 +87,8 @@ struct MaintenanceRequest {
     int logKeepDays = 30;
     bool emergency = false;
     int recoverPercent = 10;
+    QString csvArchiveDir; // 为空时不归档
+    QString dbPath;
 };
 
 struct MaintenanceResult {
@@ -97,7 +99,10 @@ struct MaintenanceResult {
     int orphans = 0;
     int skippedUnsafe = 0;
     int requests = 0;
+    int archived = 0;
     int effectiveKeepDays = 0;
+    bool compacted = false;
+    DatabaseGuard::CompactResult compact;
     double freePercent = 100.0;
 };
 
@@ -118,12 +123,13 @@ MaintenanceResult runMaintenance(const MaintenanceRequest &request)
             bool more = false;
             ArchiveMaintenance::CleanupStats stats;
             if (!ArchiveMaintenance::cleanup(db, request.archiveRoot, request.managedRoots, cutoff,
-                                             removed, more, result.error, &stats)) {
+                                             removed, more, result.error, &stats, request.csvArchiveDir)) {
                 result.ok = false;
                 return;
             }
             result.records += stats.recordsDeleted;
             result.requests += stats.requestsDeleted;
+            result.archived += stats.recordsArchived;
             result.files += stats.filesDeleted;
             result.skippedUnsafe += stats.skippedUnsafe;
             if (!more) break;
@@ -149,6 +155,11 @@ MaintenanceResult runMaintenance(const MaintenanceRequest &request)
     result.effectiveKeepDays = keepDays;
     // 日志清理与数据库无关，数据库清理失败时也照常执行
     AppLogger::cleanupLogsOlderThanDays(request.logKeepDays);
+
+    // 删除之后回收空闲页并把 WAL 写回主库、截断
+    QString compactError;
+    result.compacted = DatabaseGuard::compact(db, request.dbPath, result.compact, compactError);
+    if (!result.compacted) LOG_WARN("[DB] 空间回收未完成: {}", compactError.toStdString());
     return result;
 }
 
@@ -173,7 +184,10 @@ void AppController::startMaintenance(bool emergency)
         request.keepDays = qBound(1, DBSchema::getConfigInt(db, "cleanup/keepDays", 90), 3650);
         request.logKeepDays = qBound(1, DBSchema::getConfigInt(db, "cleanup/logKeepDays", 30), 3650);
         request.recoverPercent = qBound(1, DBSchema::getConfigInt(db, "storage/warnPercent", 10), 90);
+        if (DBSchema::getConfigBool(db, "cleanup/archiveCsv", true))
+            request.csvArchiveDir = DBSchema::csvArchiveDirectory();
     }
+    request.dbPath = DBSchema::defaultDatabasePath();
 
     LOG_INFO("执行{}历史数据清理任务: 图像保留天数={} 天, 日志保留天数={} 天",
              emergency ? "紧急" : "", request.keepDays, request.logKeepDays);
@@ -214,9 +228,16 @@ void AppController::startMaintenance(bool emergency)
                 return;
             }
             removeExpiredLegacyFtpLogs(request.logKeepDays);
-            LOG_INFO("{}清理完成: 删除记录 {} 条, 图片 {} 张, 孤儿图片 {} 张, 路径异常仅删记录 {} 组, 过期重发去重记录 {} 条, 剩余空间 {:.1f}%",
-                     request.emergency ? "紧急" : "", result.records, result.files, result.orphans,
+            LOG_INFO("{}清理完成: 删除记录 {} 条（其中归档 CSV {} 条）, 图片 {} 张, 孤儿图片 {} 张, 路径异常仅删记录 {} 组, 过期重发去重记录 {} 条, 剩余空间 {:.1f}%",
+                     request.emergency ? "紧急" : "", result.records, result.archived, result.files, result.orphans,
                      result.skippedUnsafe, result.requests, result.freePercent);
+            if (result.compacted) {
+                const auto &c = result.compact;
+                LOG_INFO("[DB] 空间回收: 库 {:.1f} MB -> {:.1f} MB, 空闲页 {} -> {}, WAL {:.1f} MB -> {:.1f} MB{}",
+                         c.fileBytesBefore / 1048576.0, c.fileBytesAfter / 1048576.0, c.freePagesBefore, c.freePagesAfter,
+                         c.walBytesBefore / 1048576.0, c.walBytesAfter / 1048576.0,
+                         c.checkpointed ? "" : "（有查询占用，WAL 未能截断，明天重试）");
+            }
             if (result.skippedUnsafe > 0)
                 LOG_WARN("清理发现 {} 组图片路径不在图像目录内（已删除记录、保留文件），请检查客户端 imageName", result.skippedUnsafe);
             if (request.emergency && result.effectiveKeepDays < request.keepDays)
@@ -337,6 +358,30 @@ void AppController::setCleanupLogKeepDays(int days)
         DBSchema::setConfig(db, "cleanup/logKeepDays", QString::number(days));
     }
     LOG_DEBUG("设置日志清理保留天数: {} 天", days);
+}
+
+bool AppController::cleanupArchiveCsv() const
+{
+    QMutexLocker locker(&m_dbMutex);
+    QSqlDatabase db = QSqlDatabase::database();
+    return DBSchema::getConfigBool(db, "cleanup/archiveCsv", true);
+}
+
+void AppController::setCleanupArchiveCsv(bool enabled)
+{
+    {
+        QMutexLocker locker(&m_dbMutex);
+        QSqlDatabase db = QSqlDatabase::database();
+        DBSchema::setConfig(db, "cleanup/archiveCsv", enabled ? QStringLiteral("true") : QStringLiteral("false"));
+    }
+    LOG_INFO("设置过期记录删除前归档 CSV: {}", enabled ? "开启" : "关闭");
+}
+
+void AppController::openCsvArchiveDirectory()
+{
+    const QString dir = DBSchema::csvArchiveDirectory();
+    QDir().mkpath(dir);
+    QDesktopServices::openUrl(QUrl::fromLocalFile(dir));
 }
 
 void AppController::setCleanupRunHour(int hour)

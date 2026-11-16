@@ -269,6 +269,116 @@ private slots:
         QVERIFY(QDir(dir.filePath("camera/deep")).exists());
         QVERIFY(q.exec("SELECT COUNT(*) FROM record")); QVERIFY(q.next()); QCOMPARE(q.value(0).toInt(),1);
     }
+    void cleanupArchivesExpiredRecordsToMonthlyCsv() {
+        // 过期记录删除前按月追加到 CSV：带 BOM 与表头，再次清理追加同一文件，表头不重复
+        QTemporaryDir dir; QTemporaryDir archiveDir;
+        QSqlQuery q(db);
+        q.prepare("INSERT INTO record(createtime,carrier_id,camera_id,wheel_id,result,imagename) VALUES(:t,7,1,3,0,:n)");
+        auto add = [&](const QString &time, double, const QString &name) {
+            q.bindValue(":t", time); q.bindValue(":n", name); return q.exec();
+        };
+        QVERIFY(add("2026-05-20 08:00:00", 11.5, "a,\"quoted\".png"));
+        QVERIFY(add("2026-06-01 09:00:00", 12.5, "b.png"));
+        QVERIFY(add("2026-06-08 10:00:00", 13.5, "fresh.png"));
+        q.finish();
+        int removed; bool more; QString error; ArchiveMaintenance::CleanupStats stats;
+        const QDateTime cutoff = QDateTime::fromString("2026-06-07T00:00:00", Qt::ISODate);
+        QVERIFY2(ArchiveMaintenance::cleanup(db, dir.path(), {dir.path()}, cutoff, removed, more, error, &stats, archiveDir.path()),
+                 qPrintable(error));
+        QCOMPARE(stats.recordsArchived, 2);
+        QCOMPARE(stats.recordsDeleted, 2);
+        {
+            // 单独的查询对象：q 仍需保留上面 prepare 的 INSERT，供下面同月再次归档使用
+            QSqlQuery check(db);
+            QVERIFY(check.exec("SELECT imagename FROM record")); QVERIFY(check.next());
+            QCOMPARE(check.value(0).toString(), QString("fresh.png")); QVERIFY(!check.next());
+        }
+
+        QFile may(QDir(archiveDir.path()).filePath("record_2026-05.csv"));
+        QVERIFY(may.open(QIODevice::ReadOnly));
+        const QByteArray mayText = may.readAll();
+        QVERIFY(mayText.startsWith("\xEF\xBB\xBF" "createtime,carrier_id,camera_id,wheel_id,result,")); // 其余列随表结构变化
+        QVERIFY(mayText.contains("2026-05-20 08:00:00,7,1,3,0,"));
+        QVERIFY(mayText.contains("\"a,\"\"quoted\"\".png\""));
+        QVERIFY(QFile::exists(QDir(archiveDir.path()).filePath("record_2026-06.csv")));
+
+        // 同月再次归档：追加到同一文件，不重复表头
+        QVERIFY(add("2026-06-02 09:00:00", 14.5, "c.png"));
+        q.finish();
+        QVERIFY2(ArchiveMaintenance::cleanup(db, dir.path(), {dir.path()}, cutoff, removed, more, error, &stats, archiveDir.path()),
+                 qPrintable(error));
+        QFile june(QDir(archiveDir.path()).filePath("record_2026-06.csv"));
+        QVERIFY(june.open(QIODevice::ReadOnly));
+        const QList<QByteArray> lines = june.readAll().split('\n');
+        QCOMPARE(lines.count(), 4); // 表头 + 2 行 + 末尾空行
+        QVERIFY(lines.at(1).startsWith("2026-06-01 09:00:00"));
+        QVERIFY(lines.at(2).startsWith("2026-06-02 09:00:00"));
+
+        // 表结构变化（表头不同）写入新文件，不改动旧文件
+        const QString other = ArchiveMaintenance::archiveFileFor(archiveDir.path(), "2026-06", "createtime,carrier_id");
+        QCOMPARE(QFileInfo(other).fileName(), QString("record_2026-06_2.csv"));
+    }
+    void cleanupKeepsRecordsWhenArchiveUnwritable() {
+        // 归档目录无法创建时整轮回滚，记录不删除
+        QTemporaryDir dir;
+        QFile blocker(dir.filePath("blocked")); QVERIFY(blocker.open(QIODevice::WriteOnly)); blocker.close();
+        QSqlQuery q(db);
+        QVERIFY(q.exec("INSERT INTO record(createtime,carrier_id,camera_id,wheel_id,result,imagename) VALUES('2026-05-20 08:00:00',1,1,1,1,'x.png')"));
+        int removed; bool more; QString error;
+        QVERIFY(!ArchiveMaintenance::cleanup(db, dir.path(), {dir.path()}, QDateTime::fromString("2026-06-07T00:00:00", Qt::ISODate),
+                                             removed, more, error, nullptr, dir.filePath("blocked/archive")));
+        QVERIFY(q.exec("SELECT COUNT(*) FROM record")); QVERIFY(q.next()); QCOMPARE(q.value(0).toInt(), 1);
+    }
+    void compactReclaimsFreePagesAndTruncatesWal() {
+        QTemporaryDir dir;
+        const QString path = dir.filePath("compact.db");
+        {
+            QSqlDatabase file = QSqlDatabase::addDatabase("QSQLITE", "compact-test");
+            file.setDatabaseName(path);
+            QVERIFY(file.open());
+            QSqlQuery q(file);
+            QVERIFY(q.exec("PRAGMA journal_mode = WAL"));
+            q.finish(); // PRAGMA 返回结果行，未结束的语句会让 VACUUM 失败
+            QString detail;
+            QVERIFY2(DatabaseGuard::enableIncrementalVacuum(file, qint64(512) * 1024 * 1024, detail), qPrintable(detail));
+            QVERIFY(DBSchema::ensureAllTables(file));
+            DatabaseGuard::SpaceInfo info; QString error;
+            QVERIFY(DatabaseGuard::spaceInfo(file, info, error));
+            QCOMPARE(info.autoVacuum, 2);
+
+            QVERIFY(file.transaction());
+            q.prepare("INSERT INTO record(createtime,carrier_id,camera_id,wheel_id,result,imagename,image_path) VALUES(:t,:c,1,:w,1,:n,:p)");
+            for (int i = 0; i < 20000; ++i) {
+                q.bindValue(":t", QString("2026-05-%1 08:00:00").arg(1 + i % 28, 2, 10, QChar('0')));
+                q.bindValue(":c", 1 + i % 50); q.bindValue(":w", 1 + i % 16);
+                q.bindValue(":n", QString("CARRIER_%1_cam%2.jpg").arg(i).arg(i % 12));
+                q.bindValue(":p", QString("D:/CarrierVision/images/2026-05-01/CARRIER_%1.jpg").arg(i));
+                QVERIFY(q.exec());
+            }
+            QVERIFY(file.commit());
+            QVERIFY(q.exec("DELETE FROM record"));
+            QVERIFY(DatabaseGuard::spaceInfo(file, info, error));
+            QVERIFY(info.freePages > 100);
+
+            DatabaseGuard::CompactResult result;
+            QVERIFY2(DatabaseGuard::compact(file, path, result, error), qPrintable(error));
+            QVERIFY(result.freePagesBefore > 100);
+            QCOMPARE(result.freePagesAfter, qint64(0));
+            QVERIFY(result.checkpointed);
+            QCOMPARE(result.walBytesAfter, qint64(0));
+            DatabaseGuard::SpaceInfo after;
+            QVERIFY(DatabaseGuard::spaceInfo(file, after, error));
+            QVERIFY(after.pageCount < info.pageCount);
+
+            const QVariantMap stats = DatabaseGuard::databaseInfo(file, path, dir.filePath("archive"));
+            QVERIFY(stats.value("ok").toBool());
+            QCOMPARE(stats.value("recordCount").toLongLong(), qint64(0));
+            QCOMPARE(stats.value("autoVacuum").toString(), QString("incremental"));
+            QCOMPARE(stats.value("archiveFiles").toInt(), 0);
+            file.close();
+        }
+        QSqlDatabase::removeDatabase("compact-test");
+    }
     void cleanupPrunesExpiredIngestRequests() {
         // TCP 重发去重表随清理一起删除过期项，否则只增不减
         QTemporaryDir dir; QSqlQuery q(db);
@@ -718,9 +828,49 @@ private slots:
         QCOMPARE(q.value(7).toInt(), 1);
         QCOMPARE(q.value(8).toString(), QString("BATCH_1_2026-09-05 12:00:00"));
 
-        // verify index exists
+        // batch_id 从不作为查询条件，不再建索引
         QVERIFY(q.exec("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_record_batch'"));
-        QVERIFY(q.next());
+        QVERIFY(!q.next());
+    }
+    void recordIndexesCoverRangeStatistics() {
+        // 模拟旧库：仅有旧索引，ensureAllTables 应替换为覆盖索引
+        QSqlQuery q(db);
+        QVERIFY(q.exec("DROP INDEX IF EXISTS idx_record_time_cover"));
+        QVERIFY(q.exec("DROP INDEX IF EXISTS idx_record_carrier_wheel_cover"));
+        QVERIFY(q.exec("CREATE INDEX idx_record_createtime ON record(createtime DESC)"));
+        QVERIFY(q.exec("CREATE INDEX idx_record_carrier_wheel ON record(carrier_id, wheel_id, createtime DESC)"));
+        QVERIFY(q.exec("CREATE INDEX idx_record_batch ON record(batch_id)"));
+        QVERIFY(DBSchema::ensureAllTables(db));
+
+        QStringList names;
+        QVERIFY(q.exec("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='record'"));
+        while (q.next()) names << q.value(0).toString();
+        QVERIFY(names.contains("idx_record_time_cover"));
+        QVERIFY(names.contains("idx_record_carrier_wheel_cover"));
+        QVERIFY(!names.contains("idx_record_createtime"));
+        QVERIFY(!names.contains("idx_record_carrier_wheel"));
+        QVERIFY(!names.contains("idx_record_batch"));
+
+        // 统计页、查询页与报警页的日期范围聚合只读索引，不回表
+        const auto plan = [&](const QString &sql) {
+            QSqlQuery explain(db);
+            if (!explain.exec("EXPLAIN QUERY PLAN " + sql)) return explain.lastError().text();
+            QStringList details;
+            while (explain.next()) details << explain.value(3).toString();
+            return details.join(" | ");
+        };
+        const QString range = "createtime >= '2026-11-01 00:00:00' AND createtime <= '2026-11-07 23:59:59'";
+        for (const QString &sql : {
+                 "SELECT carrier_id, SUM(CASE WHEN result = 1 THEN 1 ELSE 0 END) FROM record WHERE " + range
+                     + " AND wheel_id BETWEEN 9 AND 16 GROUP BY carrier_id",
+                 "SELECT COUNT(*) FROM record WHERE wheel_id BETWEEN 1 AND 16 AND " + range,
+                 "SELECT carrier_id, COUNT(*), SUM(is_handled), SUM(is_false_alarm) FROM record WHERE wheel_id BETWEEN 1 AND 16 AND "
+                     + range + " AND result = 0 GROUP BY carrier_id",
+                 QString("SELECT COUNT(*), SUM(CASE WHEN result = 0 THEN 1 ELSE 0 END) FROM record "
+                         "WHERE carrier_id = 3 AND wheel_id BETWEEN 1 AND 16")}) {
+            const QString detail = plan(sql);
+            QVERIFY2(detail.contains("COVERING INDEX"), qPrintable(sql + " -> " + detail));
+        }
     }
     // 视觉端报文示例（README 中同一条）：驱动轮图片名带最小/最大/基准/偏差/结果
     static QJsonObject visionExampleBatch() {

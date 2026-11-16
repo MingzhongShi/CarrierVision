@@ -8,7 +8,10 @@
 #include <QFileInfo>
 #include <QSqlError>
 #include <QSqlQuery>
+#include <QThread>
+#include <QDirIterator>
 #include <QUuid>
+#include <QElapsedTimer>
 
 namespace DatabaseGuard {
 
@@ -130,6 +133,206 @@ QString runningMarkerPath(const QString &dbPath)
 QString corruptMarkerPath(const QString &dbPath)
 {
     return QFileInfo(dbPath).absolutePath() + QStringLiteral("/.db-check-required");
+}
+
+namespace {
+
+bool pragmaInt(QSqlDatabase &db, const QString &name, qint64 &value, QString &error)
+{
+    QSqlQuery q(db);
+    if (!q.exec(QStringLiteral("PRAGMA ") + name) || !q.next()) {
+        error = QStringLiteral("PRAGMA %1 失败: %2").arg(name, q.lastError().text());
+        return false;
+    }
+    value = q.value(0).toLongLong();
+    return true;
+}
+
+qint64 fileSize(const QString &path)
+{
+    const QFileInfo info(path);
+    return info.exists() ? info.size() : 0;
+}
+
+} // namespace
+
+bool spaceInfo(QSqlDatabase &db, SpaceInfo &info, QString &error)
+{
+    qint64 autoVacuum = 0;
+    if (!pragmaInt(db, QStringLiteral("page_size"), info.pageSize, error)
+        || !pragmaInt(db, QStringLiteral("page_count"), info.pageCount, error)
+        || !pragmaInt(db, QStringLiteral("freelist_count"), info.freePages, error)
+        || !pragmaInt(db, QStringLiteral("auto_vacuum"), autoVacuum, error))
+        return false;
+    info.autoVacuum = static_cast<int>(autoVacuum);
+    return true;
+}
+
+bool enableIncrementalVacuum(QSqlDatabase &db, qint64 maxConvertBytes, QString &detail)
+{
+    detail.clear();
+    SpaceInfo info;
+    QString error;
+    if (!spaceInfo(db, info, error)) { detail = error; return false; }
+    if (info.autoVacuum == 2) return true;
+
+    QSqlQuery q(db);
+    if (!q.exec(QStringLiteral("PRAGMA auto_vacuum = INCREMENTAL"))) {
+        detail = q.lastError().text();
+        return false;
+    }
+    q.finish();
+    // 全新的空库设置后立即生效；已初始化过的库（包括已切到 WAL 的空库）需要 VACUUM 才能切换
+    {
+        SpaceInfo now;
+        if (spaceInfo(db, now, error) && now.autoVacuum == 2) return true;
+    }
+
+    const qint64 bytes = info.pageCount * info.pageSize;
+    if (bytes > maxConvertBytes) {
+        detail = QStringLiteral("数据库 %1 MB 超过启动时自动转换上限 %2 MB，暂不切换增量回收；删除后的空间由新数据复用")
+                     .arg(bytes / (1024 * 1024)).arg(maxConvertBytes / (1024 * 1024));
+        return true;
+    }
+    QElapsedTimer timer;
+    timer.start();
+    if (!q.exec(QStringLiteral("VACUUM"))) {
+        detail = QStringLiteral("切换增量回收的 VACUUM 失败: %1").arg(q.lastError().text());
+        return false;
+    }
+    SpaceInfo after;
+    spaceInfo(db, after, error);
+    detail = QStringLiteral("已切换为增量空间回收：VACUUM 用时 %1 ms，库 %2 MB -> %3 MB")
+                 .arg(timer.elapsed())
+                 .arg(bytes / (1024 * 1024))
+                 .arg(after.pageCount * after.pageSize / (1024 * 1024));
+    return after.autoVacuum == 2;
+}
+
+bool compact(QSqlDatabase &db, const QString &dbPath, CompactResult &result, QString &error,
+             int pagesPerStep, int maxSteps)
+{
+    result = {};
+    result.walBytesBefore = fileSize(dbPath + QStringLiteral("-wal"));
+    result.fileBytesBefore = fileSize(dbPath);
+    SpaceInfo info;
+    if (!spaceInfo(db, info, error)) return false;
+    result.freePagesBefore = info.freePages;
+
+    if (info.autoVacuum == 2) {
+        // SQLite 每 step 一次 incremental_vacuum 只释放一页，而 Qt 对无结果列的语句只 step 一次，
+        // 所以一次 exec 实际只回收一页。这里在一个事务内重复执行，每轮最多回收 pagesPerStep 页，
+        // 轮与轮之间提交并让出写锁，入库不必长时间等待
+        QSqlQuery q(db);
+        if (!q.prepare(QStringLiteral("PRAGMA incremental_vacuum(1)"))) {
+            error = QStringLiteral("incremental_vacuum 失败: %1").arg(q.lastError().text());
+            return false;
+        }
+        for (int step = 0; step < maxSteps && info.freePages > 0; ++step) {
+            const qint64 pages = qMin<qint64>(info.freePages, qMax(1, pagesPerStep));
+            if (!db.transaction()) {
+                error = QStringLiteral("incremental_vacuum 无法开始事务: %1").arg(db.lastError().text());
+                return false;
+            }
+            for (qint64 i = 0; i < pages; ++i) {
+                if (!q.exec()) {
+                    error = QStringLiteral("incremental_vacuum 失败: %1").arg(q.lastError().text());
+                    q.finish();
+                    db.rollback();
+                    return false;
+                }
+                q.finish();
+            }
+            if (!db.commit()) {
+                error = QStringLiteral("incremental_vacuum 提交失败: %1").arg(db.lastError().text());
+                db.rollback();
+                return false;
+            }
+            const qint64 before = info.freePages;
+            if (!spaceInfo(db, info, error)) return false;
+            if (info.freePages >= before) break; // 没有进展（被其他连接占用等），留待下次维护
+            QThread::msleep(20); // 让出写锁，入库不必长时间等待
+        }
+    }
+    result.freePagesAfter = info.freePages;
+
+    // TRUNCATE 需要等读者结束；有长查询时返回 busy，退回 PASSIVE，明天再试
+    QSqlQuery checkpoint(db);
+    if (checkpoint.exec(QStringLiteral("PRAGMA wal_checkpoint(TRUNCATE)")) && checkpoint.next())
+        result.checkpointed = checkpoint.value(0).toInt() == 0;
+    checkpoint.finish();
+    if (!result.checkpointed) {
+        QSqlQuery passive(db);
+        passive.exec(QStringLiteral("PRAGMA wal_checkpoint(PASSIVE)"));
+    }
+    result.walBytesAfter = fileSize(dbPath + QStringLiteral("-wal"));
+    result.fileBytesAfter = fileSize(dbPath);
+    return true;
+}
+
+QVariantMap databaseInfo(QSqlDatabase &db, const QString &dbPath, const QString &csvArchiveDir)
+{
+    QVariantMap out;
+    out.insert(QStringLiteral("path"), QDir::toNativeSeparators(dbPath));
+    out.insert(QStringLiteral("fileBytes"), fileSize(dbPath));
+    out.insert(QStringLiteral("walBytes"), fileSize(dbPath + QStringLiteral("-wal")));
+
+    qint64 backupBytes = 0;
+    const QStringList backupFiles = backups(QFileInfo(dbPath).absolutePath() + QStringLiteral("/backup"));
+    for (const QString &file : backupFiles) backupBytes += fileSize(file);
+    out.insert(QStringLiteral("backupCount"), backupFiles.size());
+    out.insert(QStringLiteral("backupBytes"), backupBytes);
+
+    qint64 archiveBytes = 0;
+    int archiveFiles = 0;
+    QString oldestArchive;
+    if (!csvArchiveDir.isEmpty() && QFileInfo(csvArchiveDir).isDir()) {
+        QDirIterator it(csvArchiveDir, {QStringLiteral("record_*.csv")}, QDir::Files);
+        while (it.hasNext()) {
+            it.next();
+            ++archiveFiles;
+            archiveBytes += it.fileInfo().size();
+            const QString name = it.fileName();
+            if (oldestArchive.isEmpty() || name < oldestArchive) oldestArchive = name;
+        }
+    }
+    out.insert(QStringLiteral("archiveDir"), QDir::toNativeSeparators(csvArchiveDir));
+    out.insert(QStringLiteral("archiveFiles"), archiveFiles);
+    out.insert(QStringLiteral("archiveBytes"), archiveBytes);
+    out.insert(QStringLiteral("oldestArchiveMonth"), oldestArchive.mid(7, 7));
+
+    if (!db.isValid() || !db.isOpen()) {
+        out.insert(QStringLiteral("ok"), false);
+        out.insert(QStringLiteral("error"), QStringLiteral("数据库未打开"));
+        return out;
+    }
+    SpaceInfo info;
+    QString error;
+    if (!spaceInfo(db, info, error)) {
+        out.insert(QStringLiteral("ok"), false);
+        out.insert(QStringLiteral("error"), error);
+        return out;
+    }
+    out.insert(QStringLiteral("pageSize"), info.pageSize);
+    out.insert(QStringLiteral("pageCount"), info.pageCount);
+    out.insert(QStringLiteral("freePages"), info.freePages);
+    out.insert(QStringLiteral("freePercent"), info.pageCount > 0 ? info.freePages * 100.0 / info.pageCount : 0.0);
+    out.insert(QStringLiteral("autoVacuum"), info.autoVacuum == 2 ? QStringLiteral("incremental")
+                                             : info.autoVacuum == 1 ? QStringLiteral("full") : QStringLiteral("none"));
+
+    // COUNT 走覆盖索引，MIN/MAX 走时间索引两端，库很大时也只需几百毫秒
+    QSqlQuery q(db);
+    if (q.exec(QStringLiteral("SELECT COUNT(*), MIN(createtime), MAX(createtime) FROM record")) && q.next()) {
+        out.insert(QStringLiteral("recordCount"), q.value(0).toLongLong());
+        out.insert(QStringLiteral("oldestRecord"), q.value(1).toString());
+        out.insert(QStringLiteral("newestRecord"), q.value(2).toString());
+    }
+    q.finish();
+    if (q.exec(QStringLiteral("SELECT COUNT(*) FROM record WHERE createtime >= datetime('now','localtime','-1 day')")) && q.next())
+        out.insert(QStringLiteral("recordsLastDay"), q.value(0).toLongLong());
+    q.finish();
+    out.insert(QStringLiteral("ok"), true);
+    return out;
 }
 
 } // namespace DatabaseGuard

@@ -73,6 +73,7 @@ Item {
                 id: queryCond
                 Layout.fillWidth: true
                 includeResult: true
+                defaultRangeDays: 7
                 onSearchClicked: {
                     root.requestPage(true);
                 }
