@@ -5,6 +5,7 @@ import "../common"
 
 Page {
     id: root
+    objectName: "alertStatsPage"
     anchors.fill: parent
     background: Rectangle { color: "transparent" }
 
@@ -28,6 +29,7 @@ Page {
     // 系统设置中预设的处置人员；上一次所选人员在本次运行内再次处置时预选
     readonly property var handlerNames: appController ? appController.alertHandlers : []
     property string lastOperatorName: ""
+    property string operatorError: ""
 
     function resetImage() {
         imageRequestId = -1
@@ -46,11 +48,14 @@ Page {
 
     function confirmDisposition() {
         if (dispositionRequestId !== -1 || !pendingDisposition.kind) return
-        var operatorName = operatorCombo.currentIndex >= 0 ? String(operatorCombo.currentText) : ""
+        // 可从名单选择，也可直接填写名单外的姓名
+        var operatorName = String(operatorCombo.editText).trim()
         if (operatorName.length === 0) {
+            operatorError = "请填写处置人员"
             operatorCombo.forceActiveFocus()
             return
         }
+        operatorError = ""
         lastOperatorName = operatorName
         var operation = pendingDisposition
         operationMessage = "正在保存处置状态…"
@@ -609,6 +614,7 @@ Page {
 
     Dialog {
         id: dispositionDialog
+        objectName: "dispositionDialog"
         parent: Overlay.overlay
         anchors.centerIn: parent
         width: Math.min(460, root.width - Theme.space6)
@@ -616,17 +622,21 @@ Page {
         modal: true
         closePolicy: Popup.CloseOnEscape
 
-        readonly property string actionText: root.pendingDisposition.kind === "handled" ? "已处理（已换轮）" : "误报"
+        readonly property string actionText: root.pendingDisposition.kind === "handled" ? "已处理" : "误报"
 
         onAboutToShow: {
+            root.operatorError = ""
             var index = root.handlerNames.indexOf(root.lastOperatorName)
-            operatorCombo.currentIndex = index >= 0 ? index : (root.handlerNames.length === 1 ? 0 : -1)
+            if (index < 0 && root.lastOperatorName.length === 0 && root.handlerNames.length === 1)
+                index = 0
+            operatorCombo.currentIndex = index
+            // 上次填写的名单外姓名同样保留
+            operatorCombo.editText = index >= 0 ? root.handlerNames[index] : root.lastOperatorName
         }
         onOpened: {
-            if (root.handlerNames.length > 0)
-                operatorCombo.forceActiveFocus()
-            else
-                cancelDispositionButton.forceActiveFocus()
+            operatorCombo.forceActiveFocus()
+            if (operatorCombo.contentItem && operatorCombo.contentItem.selectAll)
+                operatorCombo.contentItem.selectAll()
         }
         onClosed: root.pendingDisposition = ({})
 
@@ -687,38 +697,49 @@ Page {
                 font.pixelSize: Theme.fontCaption
                 font.weight: Theme.fontMedium
             }
+            // 可编辑：下拉选择系统设置中的预设名单，名单外的人员直接输入姓名
             ComboBox {
                 id: operatorCombo
+                objectName: "operatorCombo"
                 Layout.fillWidth: true
                 Layout.preferredHeight: 40
-                visible: root.handlerNames.length > 0
+                editable: true
                 model: root.handlerNames
-                displayText: currentIndex >= 0 ? currentText : "请选择处置人员"
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontBody
                 Accessible.name: "处置人员"
                 Keys.onReturnPressed: if (!popup.visible) root.confirmDisposition()
                 Keys.onEnterPressed: if (!popup.visible) root.confirmDisposition()
+                onEditTextChanged: if (root.operatorError.length > 0 && editText.trim().length > 0) root.operatorError = ""
 
                 background: Rectangle {
                     radius: Theme.radiusSmall
                     color: operatorCombo.hovered ? Theme.hover : Theme.fieldFill
                     border.width: 1
-                    border.color: (operatorCombo.activeFocus || operatorCombo.popup.visible) ? Theme.selectedBorder
-                                  : (operatorCombo.hovered ? Theme.borderStrong : Theme.border)
+                    border.color: root.operatorError.length > 0 ? Theme.dangerBorder
+                                  : ((operatorCombo.activeFocus || operatorCombo.popup.visible) ? Theme.selectedBorder
+                                     : (operatorCombo.hovered ? Theme.borderStrong : Theme.border))
                 }
 
-                contentItem: Text {
+                contentItem: TextField {
                     leftPadding: Theme.space3
-                    rightPadding: 30
-                    text: operatorCombo.displayText
-                    color: operatorCombo.currentIndex >= 0 ? Theme.text : Theme.muted
+                    rightPadding: root.handlerNames.length > 0 ? 30 : Theme.space3
+                    text: operatorCombo.editText
+                    placeholderText: "请输入或选择处置人员"
+                    placeholderTextColor: Theme.muted
+                    color: Theme.text
+                    selectionColor: Theme.accent
+                    selectedTextColor: Theme.textOnAccent
                     font: operatorCombo.font
+                    maximumLength: 32
+                    selectByMouse: true
                     verticalAlignment: Text.AlignVCenter
-                    elide: Text.ElideRight
+                    inputMethodHints: Qt.ImhNoPredictiveText
+                    background: Item {}
                 }
 
                 indicator: AppIcon {
+                    visible: root.handlerNames.length > 0
                     x: operatorCombo.width - width - Theme.space3
                     y: (operatorCombo.height - height) / 2
                     name: "icon_arrow_down"
@@ -770,9 +791,19 @@ Page {
             }
             Label {
                 Layout.fillWidth: true
-                visible: root.handlerNames.length === 0
-                text: "尚未预设处置人员，请先在“系统设置 → 报警处置”中添加。"
-                color: Theme.warn
+                visible: root.operatorError.length > 0
+                text: root.operatorError
+                color: Theme.danger
+                font.family: Theme.fontSans
+                font.pixelSize: Theme.fontCaption
+                wrapMode: Text.Wrap
+            }
+            Label {
+                Layout.fillWidth: true
+                visible: root.operatorError.length === 0
+                text: root.handlerNames.length > 0 ? "可从名单中选择，名单外的人员可直接输入姓名。"
+                                                   : "可直接输入姓名；常用人员可在“系统设置 → 报警处置”中预设。"
+                color: Theme.muted
                 font.family: Theme.fontSans
                 font.pixelSize: Theme.fontCaption
                 wrapMode: Text.Wrap
@@ -799,7 +830,7 @@ Page {
                 ActionButton {
                     text: "确认" + dispositionDialog.actionText
                     variant: "danger"
-                    enabled: root.dispositionRequestId === -1 && operatorCombo.currentIndex >= 0
+                    enabled: root.dispositionRequestId === -1
                     onClicked: root.confirmDisposition()
                 }
             }

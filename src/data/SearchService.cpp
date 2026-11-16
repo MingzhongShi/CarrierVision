@@ -309,7 +309,8 @@ bool queryRecordPage(const QSqlDatabase &db, const QString &table, const RecordF
     const qint64 offset = static_cast<qint64>(page - 1) * pageSize;
     QSqlQuery dataQuery(db);
     if (!dataQuery.prepare(QStringLiteral(
-            "SELECT createtime, carrier_id, wheel_id, camera_id, result, imagename, distance, dist_norm, lower_tolerance, %1 FROM ")
+            "SELECT createtime, carrier_id, wheel_id, camera_id, result, imagename, "
+            "COALESCE(min_value, distance), COALESCE(max_value, distance), dist_norm, deviation, %1 FROM ")
             .arg(table == QLatin1String("record") ? QStringLiteral("image_path") : QStringLiteral("NULL"))
             + table + filter.clause()
             + QStringLiteral(" ORDER BY createtime DESC LIMIT %1 OFFSET %2").arg(pageSize).arg(offset))) {
@@ -333,12 +334,14 @@ bool queryRecordPage(const QSqlDatabase &db, const QString &table, const RecordF
         item.cameraId = dataQuery.value(3).toInt();
         item.result = dataQuery.value(4).toInt();
         const QString rawName = dataQuery.value(5).toString().trimmed();
-        item.distance = dataQuery.value(6).toDouble();
-        item.dist_norm = dataQuery.value(7).toDouble();
-        item.lower_tolerance = dataQuery.value(8).toDouble();
+        // 旧记录没有 min/max/deviation 列值：最小/最大回退到 distance，偏差值保持缺失
+        item.min_value = dataQuery.value(6).toDouble();
+        item.max_value = dataQuery.value(7).toDouble();
+        item.dist_norm = dataQuery.value(8).toDouble();
+        if (!dataQuery.value(9).isNull()) item.deviation = dataQuery.value(9).toDouble();
         item.fileName = QFileInfo(rawName).fileName();
         // resolveRecordImage 只返回已确认存在的路径，无需再次检查
-        const QString resolvedPath = resolveRecordImage(dataQuery.value(9).toString(), rawName, archiveDir, sourceDir, timeText);
+        const QString resolvedPath = resolveRecordImage(dataQuery.value(10).toString(), rawName, archiveDir, sourceDir, timeText);
         if (!resolvedPath.isEmpty()) {
             item.filePath = resolvedPath;
             item.fileUrl = QUrl::fromLocalFile(resolvedPath).toString();

@@ -1,11 +1,13 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
+import QtQuick.Dialogs
 import ".."
 import "../common"
 
 Page {
     id: root
+    objectName: "logWorkspace"
     anchors.fill: parent
     background: Rectangle { color: "transparent" }
 
@@ -18,6 +20,30 @@ Page {
     property var logItems: []
     property var logStats: ({})
     property string queryError: ""
+    property int exportRequestId: -1
+    property var exportFilter: ({})
+
+    // 导出按点击时的筛选条件进行，避免选择保存位置期间条件被修改
+    function openExportDialog() {
+        if (!appController || exportRequestId !== -1) return
+        exportFilter = {
+            start: startDateField.dateString,
+            end: endDateField.dateString,
+            level: levelCombo.currentValue || "all",
+            keyword: searchField.text.trim(),
+            category: categoryCombo.currentValue || "all"
+        }
+        var range = exportFilter.start === exportFilter.end ? exportFilter.start
+                                                            : (exportFilter.start + "_" + exportFilter.end)
+        var name = (exportFilter.category === "alertDisposition" ? "报警处置记录_" : "日志_") + range
+        var folder = appController.logExportFolderUrl()
+        exportDialog.selectedNameFilter.index = 0
+        if (folder.length > 0) {
+            exportDialog.currentFolder = folder
+            exportDialog.selectedFile = folder + "/" + encodeURIComponent(name + ".xlsx")
+        }
+        exportDialog.open()
+    }
 
     // 统计指标随异步查询结果一起返回
     function refreshData() {
@@ -62,6 +88,29 @@ Page {
             root.logItems = res.items || []
             root.logStats = res.stats || {}
             root.queryError = res.error || ""
+        }
+        function onLogExportFinished(requestId, ok, message, targetPath) {
+            if (requestId !== root.exportRequestId) return
+            root.exportRequestId = -1
+            exportToast.show(ok, message, targetPath)
+        }
+    }
+
+    FileDialog {
+        id: exportDialog
+        title: "导出报警处置记录"
+        fileMode: FileDialog.SaveFile
+        nameFilters: ["Excel 工作簿 (*.xlsx)", "CSV 文件，UTF-8 (*.csv)"]
+        onAccepted: {
+            var target = String(selectedFile)
+            if (target.length === 0) return
+            // 以文件扩展名为准，未写扩展名时按所选类型补全
+            var lower = target.toLowerCase()
+            var format = lower.endsWith(".csv") ? "csv" : (lower.endsWith(".xlsx") ? "xlsx"
+                         : (selectedNameFilter.index === 1 ? "csv" : "xlsx"))
+            if (!lower.endsWith("." + format)) target += "." + format
+            var f = root.exportFilter
+            root.exportRequestId = appController.exportLogs(f.start, f.end, f.level, f.keyword, f.category, format, target)
         }
     }
 
@@ -351,6 +400,7 @@ Page {
                     }
                     ComboBox {
                         id: categoryCombo
+                        objectName: "logCategoryCombo"
                         Layout.preferredWidth: 120
                         Layout.preferredHeight: 34
                         textRole: "text"
@@ -478,6 +528,18 @@ Page {
                     text: "刷新"
                     variant: "secondary"
                     onClicked: root.refreshData()
+                }
+
+                // 导出：报警处置记录可导出为 Excel 或 CSV（当前筛选条件下的全部记录，不只是当前页）
+                ActionButton {
+                    objectName: "logExportButton"
+                    visible: categoryCombo.currentValue === "alertDisposition"
+                    Layout.preferredHeight: 34
+                    Layout.preferredWidth: 76
+                    text: root.exportRequestId !== -1 ? "导出中" : "导出"
+                    variant: "secondary"
+                    enabled: root.exportRequestId === -1 && appController && typeof appController.exportLogs === "function"
+                    onClicked: root.openExportDialog()
                 }
 
                 // 打开日志目录按钮
@@ -870,5 +932,14 @@ Page {
                 }
             }
         }
+    }
+
+    // 导出结果提示（底部居中）
+    ResultToast {
+        id: exportToast
+        z: 10
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: Theme.space6
     }
 }

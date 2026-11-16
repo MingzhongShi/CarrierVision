@@ -13,11 +13,6 @@ Item {
     property bool busy: false
     property int pendingRequest: -1
 
-    // 提示条状态
-    property bool toastOk: true
-    property string toastText: ""
-    property string toastPath: ""
-
     readonly property bool available: typeof appController !== "undefined" && appController
                                       && typeof appController.saveImageAs === "function"
     readonly property bool canSave: available && !busy && sourceUrl.length > 0
@@ -68,12 +63,7 @@ Item {
     }
 
     function showToast(ok, text, path) {
-        toastOk = ok
-        toastText = text
-        toastPath = path || ""
-        toast.opacity = 1.0
-        toastTimer.interval = ok ? 4000 : 6000
-        toastTimer.restart()
+        toast.show(ok, text, path)
     }
 
     FileDialog {
@@ -99,80 +89,11 @@ Item {
         }
     }
 
-    Timer {
-        id: toastTimer
-        repeat: false
-        onTriggered: toast.opacity = 0.0
-    }
-
-    // 结果提示条（底部居中）
-    Rectangle {
+    // 结果提示条（底部居中），位于图像信息条上方，窄窗口下也不与其重叠
+    ResultToast {
         id: toast
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.bottom: parent.bottom
-        // 位于图像信息条上方，窄窗口下也不与其重叠
         anchors.bottomMargin: Theme.space6 + Theme.space5
-        width: Math.min(parent.width - Theme.space6 * 2, toastRow.implicitWidth + Theme.space4 * 2)
-        height: 40
-        radius: Theme.radiusSmall
-        color: Theme.surfaceFloating
-        border.width: 1
-        border.color: root.toastOk ? Theme.okBorder : Theme.warnBorder
-        opacity: 0.0
-        visible: opacity > 0.0
-        Behavior on opacity { NumberAnimation { duration: Theme.animNormal } }
-
-        MouseArea {
-            anchors.fill: parent
-            hoverEnabled: true
-            onEntered: toastTimer.stop()
-            onExited: toastTimer.restart()
-        }
-
-        RowLayout {
-            id: toastRow
-            anchors.fill: parent
-            anchors.leftMargin: Theme.space4
-            anchors.rightMargin: Theme.space2
-            spacing: Theme.space2
-
-            AppIcon {
-                name: root.toastOk ? "icon_check_circle" : "icon_warning"
-                size: 16
-                color: root.toastOk ? Theme.ok : Theme.warn
-            }
-
-            Text {
-                Layout.fillWidth: true
-                text: root.toastText
-                color: Theme.text
-                font.family: Theme.fontSans
-                font.pixelSize: Theme.fontCaption
-                elide: Text.ElideMiddle
-            }
-
-            IconButton {
-                visible: root.toastOk && root.toastPath.length > 0
-                Layout.preferredHeight: 28
-                bordered: false
-                iconName: "icon_folder"
-                iconSize: 14
-                text: "打开文件夹"
-                onClicked: {
-                    appController.revealFileInFolder(root.toastPath)
-                    toast.opacity = 0.0
-                }
-            }
-
-            IconButton {
-                Layout.preferredWidth: 28
-                Layout.preferredHeight: 28
-                bordered: false
-                iconName: "icon_close"
-                iconSize: 12
-                toolTipText: "关闭提示"
-                onClicked: toast.opacity = 0.0
-            }
-        }
     }
 }

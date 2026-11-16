@@ -4,6 +4,7 @@
 #include <QDateTime>
 #include <QString>
 #include <QVector>
+#include <limits>
 
 struct ImageItem
 {
@@ -21,10 +22,11 @@ struct ImageItem
     QString fileUrl;
     QDateTime receivedAt;
     int result = 1;
-    double distance = 0.0;
-    double dist_max = 0.0;
-    double dist_norm = 0.0;
-    double lower_tolerance = 0.0;
+    // 测量值来自客户端上报；缺失时为 NaN（旧记录没有偏差值），界面显示为"—"
+    double min_value = std::numeric_limits<double>::quiet_NaN();
+    double max_value = std::numeric_limits<double>::quiet_NaN();
+    double dist_norm = std::numeric_limits<double>::quiet_NaN(); // 基准值
+    double deviation = std::numeric_limits<double>::quiet_NaN();
     QString wheelsInfo;
 };
 
@@ -50,11 +52,10 @@ public:
         FileUrlRole,
         ReceivedAtRole,
         ResultRole,
-        DistanceRole,
-        DistMaxRole,
-        DistNormRole,
-        LowerToleranceRole,
-        LowerToleranceSnakeRole,
+        MinValueRole,
+        MaxValueRole,
+        BaseValueRole,
+        DeviationRole,
         WheelsInfoRole,
         ItemObjectRole,
         ReceivedAtTextRole

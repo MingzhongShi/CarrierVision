@@ -43,6 +43,13 @@ Dialog {
     property string sourceB: ""
     property bool showSidePanel: true
 
+    // 测量值保留两位小数；缺失（NaN，如旧记录的偏差值）显示占位符
+    function formatMeasure(value) {
+        if (value === undefined || value === null || isNaN(value))
+            return "—";
+        return Number(value).toFixed(2);
+    }
+
     readonly property var activePreview: showingA ? previewA : previewB
     readonly property var pendingPreview: showingA ? previewB : previewA
     readonly property real currentImageWidth: activePreview.implicitWidth > 0 ? activePreview.implicitWidth : pendingPreview.implicitWidth
@@ -905,21 +912,27 @@ Dialog {
                             }
 
                             MetricRow {
-                                labelName: "实测间距 (Actual)"
-                                metricValue: inspectDialog.currentItemObject ? String(inspectDialog.currentItemObject.distance) : "-"
-                                unitName: "mm"
+                                labelName: "最小实测 (Min)"
+                                metricValue: inspectDialog.formatMeasure(inspectDialog.currentItemObject ? inspectDialog.currentItemObject.minValue : NaN)
+                                unitName: metricValue === "—" ? "" : "mm"
+                            }
+
+                            MetricRow {
+                                labelName: "最大实测 (Max)"
+                                metricValue: inspectDialog.formatMeasure(inspectDialog.currentItemObject ? inspectDialog.currentItemObject.maxValue : NaN)
+                                unitName: metricValue === "—" ? "" : "mm"
                             }
 
                             MetricRow {
                                 labelName: "基准距离 (Base)"
-                                metricValue: inspectDialog.currentItemObject ? String(inspectDialog.currentItemObject.distNorm) : "-"
-                                unitName: "mm"
+                                metricValue: inspectDialog.formatMeasure(inspectDialog.currentItemObject ? inspectDialog.currentItemObject.baseValue : NaN)
+                                unitName: metricValue === "—" ? "" : "mm"
                             }
 
                             MetricRow {
-                                labelName: "下偏差 (Lower Tol)"
-                                metricValue: inspectDialog.currentItemObject ? String(inspectDialog.currentItemObject.lowerTolerance !== undefined ? inspectDialog.currentItemObject.lowerTolerance : 0.0) : "-"
-                                unitName: "mm"
+                                labelName: "偏差值 (Deviation)"
+                                metricValue: inspectDialog.formatMeasure(inspectDialog.currentItemObject ? inspectDialog.currentItemObject.deviation : NaN)
+                                unitName: metricValue === "—" ? "" : "mm"
                             }
 
                             Label {

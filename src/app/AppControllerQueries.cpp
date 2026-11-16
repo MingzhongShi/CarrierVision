@@ -15,6 +15,9 @@
 #include "ingest/IngestCoordinator.h"
 #include "common/StorageMonitor.h"
 #include "common/ImageExport.h"
+#include "common/LogExport.h"
+#include <QStandardPaths>
+#include <QUrl>
 #include <iostream>
 #include <QDir>
 #include <QFile>
@@ -108,12 +111,10 @@ int AppController::requestAlertOperation(const QString &kind, const QString &sta
     const QString operatorText = SettingsStore::normalizeAlertHandlerName(operatorName);
     const bool disposition = kind == QLatin1String("handled") || kind == QLatin1String("falseAlarm");
     if (disposition) {
-        // 处置人必须来自系统设置中的预设名单
+        // 处置人可从系统设置的预设名单中选择，也可直接填写名单外的姓名；只拒绝空名
         QString error;
         if (operatorText.isEmpty())
-            error = QStringLiteral("请选择处置人员");
-        else if (!alertHandlers().contains(operatorText, Qt::CaseInsensitive))
-            error = QStringLiteral("处置人员不在系统设置的名单中，请重新选择");
+            error = QStringLiteral("请填写处置人员");
         if (!error.isEmpty()) {
             LOG_WARN("报警处置被拒绝，架号={}，轮位={}：{}", rack, wheel, error.toStdString());
             QMetaObject::invokeMethod(this, [this, requestId, error]() {
@@ -337,6 +338,61 @@ void AppController::startLogQuery()
         result["stats"] = AppLogger::getLogStats();
         return result;
     }));
+}
+
+QString AppController::logExportFolderUrl() const
+{
+    QString dir = m_lastLogExportDir;
+    if (dir.isEmpty() || !QFileInfo(dir).isDir())
+        dir = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
+    if (dir.isEmpty() || !QFileInfo(dir).isDir())
+        dir = QStandardPaths::writableLocation(QStandardPaths::DesktopLocation);
+    return dir.isEmpty() ? QString() : QUrl::fromLocalFile(dir).toString();
+}
+
+int AppController::exportLogs(const QString &startDate, const QString &endDate, const QString &level,
+                              const QString &keyword, const QString &category, const QString &format,
+                              const QString &target)
+{
+    const int requestId = ++m_logExportSeq;
+    const QString targetPath = ImageExport::localPathFromSource(target);
+    const bool xlsx = format.compare(QLatin1String("xlsx"), Qt::CaseInsensitive) == 0;
+    // 跨多天的日志可能有数十 MB，读取与写文件都放到后台线程
+    (void)QtConcurrent::run(&m_exportPool, [this, requestId, startDate, endDate, level, keyword, category, xlsx, targetPath]() {
+        QElapsedTimer timer;
+        timer.start();
+        const bool alertDisposition = category.trimmed() == QLatin1String("alertDisposition");
+        LogExport::Table table = LogExport::makeTable(alertDisposition);
+        QString error;
+        bool ok = AppLogger::forEachLog(startDate, endDate, level, keyword, category,
+            [&](const QString &time, const QString &lvl, const QString &message, const QString &) {
+                LogExport::appendLogRow(table, alertDisposition, time, lvl, message);
+                return !xlsx || table.rows.size() <= LogExport::kMaxXlsxRows;
+            }, &error);
+        // 文件按时间正序写出，与日志文件一致
+        QByteArray data;
+        if (ok) {
+            data = xlsx ? LogExport::toXlsx(table, alertDisposition ? QStringLiteral("报警处置") : QStringLiteral("日志"), &error)
+                        : LogExport::toCsv(table);
+            ok = !data.isEmpty() && LogExport::writeFile(targetPath, data, error);
+        }
+        const qint64 rows = table.rows.size();
+        QString message;
+        if (ok) {
+            message = QStringLiteral("已导出 %1 条日志").arg(rows);
+            LOG_INFO("日志导出完成: 格式={}, 类型={}, 日期={} 至 {}, 条数={}, 文件={}, 耗时={}ms",
+                     xlsx ? "xlsx" : "csv", category.toStdString(), startDate.toStdString(), endDate.toStdString(),
+                     rows, targetPath.toStdString(), timer.elapsed());
+        } else {
+            message = QStringLiteral("导出失败：%1").arg(error.isEmpty() ? QStringLiteral("未知原因") : error);
+            LOG_WARN("日志导出失败: 文件={}, 原因={}", targetPath.toStdString(), error.toStdString());
+        }
+        QMetaObject::invokeMethod(this, [this, requestId, ok, message, targetPath]() {
+            if (ok) m_lastLogExportDir = QFileInfo(targetPath).absolutePath();
+            emit logExportFinished(requestId, ok, message, ok ? targetPath : QString());
+        }, Qt::QueuedConnection);
+    });
+    return requestId;
 }
 
 void AppController::openLogDirectory()

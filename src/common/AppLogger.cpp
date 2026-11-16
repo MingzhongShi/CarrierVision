@@ -621,32 +621,32 @@ QVariantMap AppLogger::queryLogs(const QString &dateStr, const QString &level, c
     return queryLogRange(dateStr, dateStr, level, keyword, page, pageSize, category);
 }
 
-QVariantMap AppLogger::queryLogRange(const QString &startDate, const QString &endDate, const QString &level,
-                                     const QString &keyword, int page, int pageSize, const QString &category)
+namespace {
+
+struct LogVolume { QString path; qint64 size; QDate date; int index; };
+
+// 解析日期范围并列出范围内的日志分卷（按日期从早到晚、同一天按分卷号排列，与写入顺序一致）。
+// 文件长度在此处快照，之后的扫描只读到快照长度，并发写入不会改变分页边界
+bool collectLogVolumes(const QString &logDir, const QString &startDate, const QString &endDate,
+                       QList<LogVolume> &volumes, QDate &first, QDate &last, QString &error)
 {
-    page = qMax(1, page);
-    pageSize = qBound(1, pageSize <= 0 ? 50 : pageSize, 200);
     const QString today = QDate::currentDate().toString(Qt::ISODate);
     const QString startText = startDate.trimmed().isEmpty() ? today : startDate.trimmed();
     const QString endText = endDate.trimmed().isEmpty() ? startText : endDate.trimmed();
-    QVariantMap result{{"page",page},{"pageSize",pageSize},{"total",0},{"totalPages",1},{"items",QVariantList()}};
-    QDate first = QDate::fromString(startText, Qt::ISODate);
-    QDate last = QDate::fromString(endText, Qt::ISODate);
+    first = QDate::fromString(startText, Qt::ISODate);
+    last = QDate::fromString(endText, Qt::ISODate);
     if (!first.isValid() || !last.isValid()) {
-        result["error"] = QStringLiteral("无效的日志日期"); return result;
+        error = QStringLiteral("无效的日志日期");
+        return false;
     }
     if (first > last) std::swap(first, last);
-    if (first.daysTo(last) >= kMaxLogQueryDays) {
-        result["error"] = QStringLiteral("日志查询范围不能超过 %1 天").arg(kMaxLogQueryDays); return result;
+    if (first.daysTo(last) >= AppLogger::kMaxLogQueryDays) {
+        error = QStringLiteral("日志查询范围不能超过 %1 天").arg(AppLogger::kMaxLogQueryDays);
+        return false;
     }
-    result["startDate"] = first.toString(Qt::ISODate);
-    result["endDate"] = last.toString(Qt::ISODate);
 
-    // 按日期从早到晚、同一天按分卷号排列，与写入顺序一致
-    struct Volume { QString path; qint64 size; QDate date; int index; };
-    QList<Volume> volumes;
     const QRegularExpression volumeRe(QStringLiteral("^carrier_(\\d{4}-\\d{2}-\\d{2})(?:\\.([0-9]+))?\\.log$"));
-    for (const auto &info : QDir(s_logDir).entryInfoList({QStringLiteral("carrier_*.log")}, QDir::Files)) {
+    for (const auto &info : QDir(logDir).entryInfoList({QStringLiteral("carrier_*.log")}, QDir::Files)) {
         const auto match = volumeRe.match(info.fileName());
         if (!match.hasMatch()) continue;
         const QDate date = QDate::fromString(match.captured(1), Qt::ISODate);
@@ -657,53 +657,98 @@ QVariantMap AppLogger::queryLogRange(const QString &startDate, const QString &en
         if (!file.open(QIODevice::ReadOnly)) continue;
         volumes.append({info.absoluteFilePath(), file.size(), date, match.captured(2).toInt()});
     }
-    std::sort(volumes.begin(),volumes.end(),[](const auto &a,const auto &b){
+    std::sort(volumes.begin(), volumes.end(), [](const auto &a, const auto &b) {
         return a.date != b.date ? a.date < b.date : a.index < b.index;
     });
+    return true;
+}
+
+// 按时间正序逐行扫描分卷，对通过级别 / 类别 / 关键字过滤的行调用 visitor；visitor 返回 false 时停止
+void scanLogVolumes(const QList<LogVolume> &volumes, const QString &level, const QString &keyword,
+                    const QString &category, const AppLogger::LogVisitor &visitor)
+{
     const QString filterLevel = level.trimmed().toLower(), filterKeyword = keyword.trimmed();
     // 报警处置日志统一以"报警处置"开头（完成 / 失败），历史日志同样适用
     const bool alertDispositionOnly = category.trimmed() == QLatin1String("alertDisposition");
     const QString alertDispositionPrefix = QStringLiteral("报警处置");
     const QRegularExpression lineRe(QStringLiteral("^\\[(\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}\\.\\d{3})\\] \\[(\\w+)\\] (.*)$"));
-    qint64 total = 0;
-    QVariantList items;
-    // Two streaming passes: keep only one requested page in memory. Snapshot file
-    // lengths prevent concurrent appends from changing page boundaries mid-query.
-    auto scan = [&](bool collect, qint64 first, qint64 last) {
-        qint64 index = 0;
-        for (const auto &volume : volumes) {
-            QFile file(volume.path);
-            if (!file.open(QIODevice::ReadOnly)) continue;
-            while (!file.atEnd() && file.pos() < volume.size) {
-                const QByteArray raw = file.readLine(qMin<qint64>(64*1024,volume.size-file.pos()+1));
-                if (raw.isEmpty()) break;
-                const QString line = QString::fromUtf8(raw).trimmed();
-                if (line.isEmpty()) continue;
-                const auto match = lineRe.match(line);
-                const QString time = match.hasMatch() ? match.captured(1) : QString();
-                const QString lvl = match.hasMatch() ? match.captured(2).toLower() : QStringLiteral("info");
-                const QString message = match.hasMatch() ? match.captured(3) : line;
-                if (!filterLevel.isEmpty() && filterLevel!="all") {
-                    if (filterLevel=="warn" || filterLevel=="warning") { if(lvl!="warn" && lvl!="warning") continue; }
-                    else if(filterLevel=="error" || filterLevel=="critical") { if(lvl!="error" && lvl!="critical") continue; }
-                    else if(lvl!=filterLevel) continue;
-                }
-                if (alertDispositionOnly && !message.startsWith(alertDispositionPrefix)) continue;
-                if (!filterKeyword.isEmpty() && !message.contains(filterKeyword,Qt::CaseInsensitive)
-                    && !time.contains(filterKeyword,Qt::CaseInsensitive)) continue;
-                if (collect && index>=first && index<last) {
-                    items.append(QVariantMap{{"time",time},{"level",lvl.toUpper()},{"message",message},{"raw",line}});
-                }
-                ++index;
-                if (collect && index>=last) return index;
+    for (const auto &volume : volumes) {
+        QFile file(volume.path);
+        if (!file.open(QIODevice::ReadOnly)) continue;
+        while (!file.atEnd() && file.pos() < volume.size) {
+            const QByteArray raw = file.readLine(qMin<qint64>(64*1024,volume.size-file.pos()+1));
+            if (raw.isEmpty()) break;
+            const QString line = QString::fromUtf8(raw).trimmed();
+            if (line.isEmpty()) continue;
+            const auto match = lineRe.match(line);
+            const QString time = match.hasMatch() ? match.captured(1) : QString();
+            const QString lvl = match.hasMatch() ? match.captured(2).toLower() : QStringLiteral("info");
+            const QString message = match.hasMatch() ? match.captured(3) : line;
+            if (!filterLevel.isEmpty() && filterLevel!="all") {
+                if (filterLevel=="warn" || filterLevel=="warning") { if(lvl!="warn" && lvl!="warning") continue; }
+                else if(filterLevel=="error" || filterLevel=="critical") { if(lvl!="error" && lvl!="critical") continue; }
+                else if(lvl!=filterLevel) continue;
             }
+            if (alertDispositionOnly && !message.startsWith(alertDispositionPrefix)) continue;
+            if (!filterKeyword.isEmpty() && !message.contains(filterKeyword,Qt::CaseInsensitive)
+                && !time.contains(filterKeyword,Qt::CaseInsensitive)) continue;
+            if (!visitor(time, lvl, message, line)) return;
         }
-        return index;
-    };
-    total = scan(false,0,0);
+    }
+}
+
+} // namespace
+
+bool AppLogger::forEachLog(const QString &startDate, const QString &endDate, const QString &level,
+                           const QString &keyword, const QString &category, const LogVisitor &visitor,
+                           QString *error)
+{
+    QList<LogVolume> volumes;
+    QDate first, last;
+    QString reason;
+    if (!collectLogVolumes(s_logDir, startDate, endDate, volumes, first, last, reason)) {
+        if (error) *error = reason;
+        return false;
+    }
+    scanLogVolumes(volumes, level, keyword, category, visitor);
+    return true;
+}
+
+QVariantMap AppLogger::queryLogRange(const QString &startDate, const QString &endDate, const QString &level,
+                                     const QString &keyword, int page, int pageSize, const QString &category)
+{
+    page = qMax(1, page);
+    pageSize = qBound(1, pageSize <= 0 ? 50 : pageSize, 200);
+    QVariantMap result{{"page",page},{"pageSize",pageSize},{"total",0},{"totalPages",1},{"items",QVariantList()}};
+    QList<LogVolume> volumes;
+    QDate first, last;
+    QString error;
+    if (!collectLogVolumes(s_logDir, startDate, endDate, volumes, first, last, error)) {
+        result["error"] = error;
+        return result;
+    }
+    result["startDate"] = first.toString(Qt::ISODate);
+    result["endDate"] = last.toString(Qt::ISODate);
+
+    // 两遍流式扫描：第一遍计数，第二遍只收集请求的一页，内存中只保留一页
+    qint64 total = 0;
+    scanLogVolumes(volumes, level, keyword, category, [&total](const QString &, const QString &, const QString &, const QString &) {
+        ++total;
+        return true;
+    });
     const qint64 offset = qint64(page-1)*pageSize;
     const qint64 lastIndex = qMax<qint64>(0,total-offset), firstIndex=qMax<qint64>(0,lastIndex-pageSize);
-    if (lastIndex>firstIndex) scan(true,firstIndex,lastIndex);
+    QVariantList items;
+    if (lastIndex > firstIndex) {
+        qint64 index = 0;
+        scanLogVolumes(volumes, level, keyword, category,
+                       [&](const QString &time, const QString &lvl, const QString &message, const QString &line) {
+            if (index >= firstIndex && index < lastIndex)
+                items.append(QVariantMap{{"time",time},{"level",lvl.toUpper()},{"message",message},{"raw",line}});
+            ++index;
+            return index < lastIndex;
+        });
+    }
     std::reverse(items.begin(),items.end());
     result["total"] = total;
     result["totalPages"] = qMax<qint64>(1,(total+pageSize-1)/pageSize);

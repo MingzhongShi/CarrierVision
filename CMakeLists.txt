@@ -111,6 +111,10 @@ qt_add_executable(CarrierVision
     src/common/StorageMonitor.h
     src/common/ImageExport.cpp
     src/common/ImageExport.h
+    src/common/LogExport.cpp
+    src/common/LogExport.h
+    src/common/ZipWriter.cpp
+    src/common/ZipWriter.h
     src/common/CrashHandler.cpp
     src/common/CrashHandler.h
 )
@@ -167,6 +171,7 @@ qt_add_qml_module(CarrierVision
         qml/common/IconButton.qml
         qml/common/ViewerZoomControls.qml
         qml/common/ImageSaveAs.qml
+        qml/common/ResultToast.qml
 
         # 首页与3D数字孪生视窗
         qml/home/HomeWorkspace.qml
@@ -442,6 +447,7 @@ if(BUILD_TESTING)
         src/app/ThumbnailCache.cpp src/app/ThumbnailCache.h
         src/network/TcpDataReceiver.cpp src/network/TcpDataReceiver.h
         src/ingest/ImageIngest.cpp src/ingest/ImageIngest.h
+        src/ingest/IngestCoordinator.cpp src/ingest/IngestCoordinator.h
         src/data/ArchiveMaintenance.cpp src/data/ArchiveMaintenance.h
         src/network/FtpServer.cpp src/network/FtpServer.h
         src/network/FtpIngestService.cpp src/network/FtpIngestService.h
@@ -449,6 +455,8 @@ if(BUILD_TESTING)
         src/data/DbSchema.cpp src/data/DbSchema.h
         src/data/DatabaseGuard.cpp src/data/DatabaseGuard.h
         src/common/ImageExport.cpp src/common/ImageExport.h
+        src/common/LogExport.cpp src/common/LogExport.h
+        src/common/ZipWriter.cpp src/common/ZipWriter.h
         src/common/AgcUtils.cpp src/common/AgcUtils.h
         src/common/AppLogger.cpp src/common/AppLogger.h)
     target_include_directories(CarrierVisionReleaseTests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
@@ -497,6 +505,7 @@ if(BUILD_TESTING)
             qml/common/IconButton.qml
             qml/common/ViewerZoomControls.qml
             qml/common/ImageSaveAs.qml
+            qml/common/ResultToast.qml
             qml/common/ZoomOverlay.qml)
     qt_add_resources(CarrierVisionWheelSelectionTests wheel_test_icons
         PREFIX "/qt/qml/CarrierVision"

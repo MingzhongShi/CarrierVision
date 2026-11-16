@@ -379,19 +379,13 @@ void AppController::onFtpImageStored(const QString &filePath, const QString &req
     int linkedRows = 0;
     {
         QMutexLocker locker(&m_dbMutex);
-        QSqlQuery update(QSqlDatabase::database());
-        update.prepare(QStringLiteral(
-            "UPDATE record SET image_path = :path "
-            "WHERE createtime >= :since AND imagename = :name COLLATE NOCASE "
-            // 写成 COALESCE 表达式而不是 "image_path IS NULL OR image_path = ''"：后者会让 SQLite 改走
-            // image_path 索引，逐行扫描全部未关联图片的历史记录（升级前的记录全部为空），
-            // 记录越多越慢，且在主线程上每收到一张图执行一次。表达式形式只走最近 1 小时的时间索引
-            "AND COALESCE(image_path, '') = ''"));
-        update.bindValue(QStringLiteral(":path"), absolutePath);
-        update.bindValue(QStringLiteral(":since"), AgcUtils::formatDateTime(QDateTime::currentDateTime().addSecs(-3600)));
-        update.bindValue(QStringLiteral(":name"), requestedName);
-        if (update.exec()) linkedRows = update.numRowsAffected();
-        else LOG_ERROR("[FTP] 补写图片路径失败: 文件={}, 原因={}", requestedName.toStdString(), update.lastError().text().toStdString());
+        QString linkError;
+        linkedRows = ImageIngest::linkRecordImage(QSqlDatabase::database(), requestedName, absolutePath,
+                                                  QDateTime::currentDateTime().addSecs(-3600), linkError);
+        if (linkedRows < 0) {
+            linkedRows = 0;
+            LOG_ERROR("[FTP] 补写图片路径失败: 文件={}, 原因={}", requestedName.toStdString(), linkError.toStdString());
+        }
     }
 
     // 只更新正在等待这张图的批次卡片；否则（如 _vN 新图先于其批次到达）放入缓存，
