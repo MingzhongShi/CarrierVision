@@ -236,9 +236,15 @@ void AppController::searchPaged(const QString &startText, const QString &endText
         QVector<ImageItem> items;
         if (!queryRecordPage(db, QStringLiteral("record"), filter, page, pageSize, archiveDir, sourceDir, totalCount, items))
             return;
+        // 图片目录丢失时整页都缺图：每次查询只汇总一条，避免逐行告警刷屏并反复触发状态栏刷新
+        QStringList missing;
         for (const ImageItem &item : std::as_const(items)) {
-            if (item.filePath.isEmpty())
-                LOG_WARN("分页搜索结果中图片文件缺失: {}", item.fileName.toStdString());
+            if (item.filePath.isEmpty()) missing << item.fileName;
+        }
+        if (!missing.isEmpty()) {
+            LOG_WARN("分页搜索第 {} 页有 {}/{} 张图片文件缺失（图像目录: {}），例如: {}",
+                     page, missing.size(), items.size(), archiveDir.toStdString(),
+                     missing.mid(0, 3).join(QStringLiteral(", ")).toStdString());
         }
 
         LOG_DEBUG("searchPaged: start={} end={} serial={} rack={} wheel={} res={} page={} pageSize={} count={}",

@@ -10,12 +10,105 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
+#include <QMutex>
 #include <QSqlError>
 #include <QUrl>
 
 #include <limits>
 
 namespace SearchService {
+
+namespace {
+
+// 图片查找的两级缓存，所有线程共用：
+// 1. 目录可用性：根目录或日期子目录被移走、盘符或网络共享断开时，每次访问都可能很慢（网络路径可达数秒），
+//    同一目录 60 秒内只向文件系统确认一次，不存在的目录直接跳过其下的所有候选文件。
+// 2. 未找到的图片：历史图片目录丢失后，每次翻页、每次刷新热力图都会对同一批记录重复全套查找；
+//    同一图片在同样的查找条件下 2 分钟内不再重复查找。FTP 收到同名图片时立即作废（noteImageStored）。
+constexpr qint64 kDirTtlMs = 60'000;
+constexpr qint64 kMissTtlMs = 120'000;
+constexpr int kMaxDirEntries = 4096;
+constexpr int kMaxMissEntries = 20000;
+
+struct DirState { bool exists = false; qint64 expiresAt = 0; };
+struct MissState { QString signature; qint64 expiresAt = 0; };
+
+QMutex s_cacheMutex;
+QHash<QString, DirState> s_dirs;
+QHash<QString, MissState> s_misses;
+
+QString dirKey(const QString &dir)
+{
+    return QDir::cleanPath(QDir::fromNativeSeparators(dir)).toLower();
+}
+
+QString missKey(const QString &imageName)
+{
+    return QFileInfo(QDir::fromNativeSeparators(imageName.trimmed())).fileName().toLower();
+}
+
+bool dirAvailable(const QString &dir)
+{
+    if (dir.isEmpty()) return false;
+    const QString key = dirKey(dir);
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    {
+        QMutexLocker locker(&s_cacheMutex);
+        const auto it = s_dirs.constFind(key);
+        if (it != s_dirs.cend() && it->expiresAt > now) return it->exists;
+    }
+    const bool exists = QFileInfo(dir).isDir(); // 锁外访问文件系统，慢目录不阻塞其他线程
+    QMutexLocker locker(&s_cacheMutex);
+    if (s_dirs.size() >= kMaxDirEntries) s_dirs.clear();
+    s_dirs.insert(key, {exists, now + kDirTtlMs});
+    return exists;
+}
+
+// 候选文件所在目录可用时才访问文件本身
+QString existingFile(const QString &path)
+{
+    if (path.isEmpty()) return QString();
+    const QFileInfo info(path);
+    if (!dirAvailable(info.absolutePath())) return QString();
+    return info.isFile() ? info.absoluteFilePath() : QString();
+}
+
+bool recentlyMissing(const QString &key, const QString &signature)
+{
+    if (key.isEmpty()) return false;
+    QMutexLocker locker(&s_cacheMutex);
+    const auto it = s_misses.constFind(key);
+    return it != s_misses.cend() && it->signature == signature
+        && it->expiresAt > QDateTime::currentMSecsSinceEpoch();
+}
+
+void rememberMissing(const QString &key, const QString &signature)
+{
+    if (key.isEmpty()) return;
+    QMutexLocker locker(&s_cacheMutex);
+    if (s_misses.size() >= kMaxMissEntries) s_misses.clear();
+    s_misses.insert(key, {signature, QDateTime::currentMSecsSinceEpoch() + kMissTtlMs});
+}
+
+} // namespace
+
+void noteImageStored(const QString &filePath)
+{
+    const QFileInfo info(filePath);
+    const QString key = missKey(info.fileName());
+    QMutexLocker locker(&s_cacheMutex);
+    if (!key.isEmpty()) s_misses.remove(key);
+    // 新建的日期子目录可能刚被记为"不存在"
+    s_dirs.insert(dirKey(info.absolutePath()), {true, QDateTime::currentMSecsSinceEpoch() + kDirTtlMs});
+}
+
+void clearImageLookupCache()
+{
+    QMutexLocker locker(&s_cacheMutex);
+    s_dirs.clear();
+    s_misses.clear();
+}
 
 QString resolveImagePath(const QString &rawName, const QString &archiveDir, const QString &sourceDir)
 {
@@ -31,16 +124,6 @@ QString resolveImagePath(const QString &rawName, const QString &archiveDir, cons
     // 缓存上次命中的有效根路径（线程局部），在连续解析同一批次图像时几乎 100% 首测命中
     static thread_local QString s_lastHitRoot;
 
-    auto testCandidate = [](const QString &root, const QString &rel) -> QString {
-        if (root.isEmpty() || rel.isEmpty()) return QString();
-        const QString candidate = QDir(root).filePath(rel);
-        if (QFile::exists(candidate)) {
-            s_lastHitRoot = root;
-            return QFileInfo(candidate).absoluteFilePath();
-        }
-        return QString();
-    };
-
     // 剥离历史前缀提取相对子路径
     QString subPath = trimmed;
     int idx = subPath.indexOf(QStringLiteral("images/"));
@@ -51,55 +134,34 @@ QString resolveImagePath(const QString &rawName, const QString &archiveDir, cons
         if (idx >= 0) subPath = subPath.mid(idx + 8);
     }
 
-    // 1. 优先尝试上次命中的有效根目录（单次 I/O 检查直接命中）
-    if (!s_lastHitRoot.isEmpty()) {
-        QString hit = testCandidate(s_lastHitRoot, trimmed);
+    auto tryRoot = [&](const QString &root) -> QString {
+        if (root.isEmpty() || !dirAvailable(root)) return QString();
+        const QDir dir(root);
+        QString hit = existingFile(dir.filePath(trimmed));
+        if (hit.isEmpty() && subPath != trimmed) hit = existingFile(dir.filePath(subPath));
+        if (!hit.isEmpty()) s_lastHitRoot = root;
+        return hit;
+    };
+
+    // 1. 上次命中的根目录；2. 当前配置的图像目录与源目录
+    QStringList tried;
+    for (const QString &root : {s_lastHitRoot, archiveDir, sourceDir}) {
+        if (root.isEmpty() || tried.contains(root)) continue;
+        tried << root;
+        const QString hit = tryRoot(root);
         if (!hit.isEmpty()) return hit;
-        if (subPath != trimmed) {
-            hit = testCandidate(s_lastHitRoot, subPath);
-            if (!hit.isEmpty()) return hit;
-        }
     }
 
-    // 2. 尝试当前配置的归档目录与源目录
-    if (archiveDir != s_lastHitRoot) {
-        QString hit = testCandidate(archiveDir, trimmed);
-        if (!hit.isEmpty()) return hit;
-        if (subPath != trimmed) {
-            hit = testCandidate(archiveDir, subPath);
-            if (!hit.isEmpty()) return hit;
-        }
-    }
-    if (sourceDir != s_lastHitRoot && sourceDir != archiveDir) {
-        QString hit = testCandidate(sourceDir, trimmed);
-        if (!hit.isEmpty()) return hit;
-        if (subPath != trimmed) {
-            hit = testCandidate(sourceDir, subPath);
-            if (!hit.isEmpty()) return hit;
-        }
-    }
-
-    // 3. 静态备用相对路径（避免每次重复分配构造 QStringList）
+    // 3. 程序目录下的默认图像目录与旧版归档目录（未配置图像目录或配置被改动时的兜底）
     static const QString appDir = QCoreApplication::applicationDirPath();
     static const QStringList fallbackRoots = {
         QDir(appDir).filePath(QStringLiteral("images")),
-        QDir(appDir).filePath(QStringLiteral("archive")),
-        QDir(appDir).filePath(QStringLiteral("../images")),
-        QDir(appDir).filePath(QStringLiteral("../archive")),
-        QDir(appDir).filePath(QStringLiteral("../../../images")),
-        QDir(appDir).filePath(QStringLiteral("../../../archive")),
-        QDir(appDir).filePath(QStringLiteral("../../../../images")),
-        QDir(appDir).filePath(QStringLiteral("../../../../archive"))
+        QDir(appDir).filePath(QStringLiteral("archive"))
     };
-
     for (const QString &root : fallbackRoots) {
-        if (root == s_lastHitRoot || root == archiveDir || root == sourceDir) continue;
-        QString hit = testCandidate(root, trimmed);
+        if (tried.contains(root)) continue;
+        const QString hit = tryRoot(root);
         if (!hit.isEmpty()) return hit;
-        if (subPath != trimmed) {
-            hit = testCandidate(root, subPath);
-            if (!hit.isEmpty()) return hit;
-        }
     }
 
     return QString();
@@ -109,22 +171,31 @@ QString resolveRecordImage(const QString &imagePath, const QString &imageName,
                            const QString &archiveDir, const QString &sourceDir,
                            const QString &createTime)
 {
-    if (!imagePath.isEmpty()) {
-        const QFileInfo stored(imagePath);
-        if (stored.isAbsolute() && stored.isFile()) return stored.absoluteFilePath();
+    // 1. 记录中的实际落盘路径（所在目录已不存在时不再访问文件本身）
+    if (!imagePath.isEmpty() && QFileInfo(imagePath).isAbsolute()) {
+        const QString stored = existingFile(imagePath);
+        if (!stored.isEmpty()) return stored;
     }
-    const QString found = resolveImagePath(imageName, archiveDir, sourceDir);
-    if (!found.isEmpty() || archiveDir.isEmpty() || createTime.isEmpty()) return found;
 
-    // 记录未关联落盘路径（如图片早于记录很久到达）时，FTP 按接收日期存入的子目录需按记录日期查找
+    const QString key = missKey(imageName);
+    const QDateTime at = createTime.isEmpty() ? QDateTime() : AgcUtils::parseFlexibleDateTime(createTime, false);
+    const QString signature = archiveDir + u'|' + sourceDir + u'|' + imagePath + u'|'
+        + (at.isValid() ? at.date().toString(Qt::ISODate) : QString());
+    if (recentlyMissing(key, signature)) return QString();
+
+    // 2. FTP 按接收日期存入的子目录（当前默认存储方式）：按记录日期及前后一天查找
     const QString fileName = QFileInfo(QDir::fromNativeSeparators(imageName.trimmed())).fileName();
-    const QDateTime at = AgcUtils::parseFlexibleDateTime(createTime, false);
-    if (fileName.isEmpty() || !at.isValid()) return found;
-    for (int offset : {0, -1, 1}) {
-        const QString candidate = QDir(archiveDir).filePath(
-            at.date().addDays(offset).toString(QStringLiteral("yyyy-MM-dd")) + QLatin1Char('/') + fileName);
-        if (QFileInfo(candidate).isFile()) return QFileInfo(candidate).absoluteFilePath();
+    if (!archiveDir.isEmpty() && !fileName.isEmpty() && at.isValid()) {
+        for (int offset : {0, -1, 1}) {
+            const QString hit = existingFile(QDir(archiveDir).filePath(
+                at.date().addDays(offset).toString(QStringLiteral("yyyy-MM-dd")) + QLatin1Char('/') + fileName));
+            if (!hit.isEmpty()) return hit;
+        }
     }
+
+    // 3. 按图片名在各图像根目录查找（旧版平铺存放、客户端自建子目录）
+    const QString found = resolveImagePath(imageName, archiveDir, sourceDir);
+    if (found.isEmpty()) rememberMissing(key, signature);
     return found;
 }
 

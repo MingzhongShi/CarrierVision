@@ -76,6 +76,7 @@ void AppController::loadFtpSettingsFromFile()
         const QString resolved = AgcUtils::resolveAppPath(m_imageDirSetting);
         if (resolved != m_archiveDirectory) {
             m_archiveDirectory = resolved;
+            SearchService::clearImageLookupCache();
             emit archiveDirectoryChanged();
         }
     }
@@ -373,6 +374,7 @@ void AppController::onFtpImageStored(const QString &filePath, const QString &req
     // 以客户端请求的文件名关联：同名不同内容被保存为 _vN 时，仍对应报文中的 imageName
     const QString requestedName = QFileInfo(requestedPath.isEmpty() ? filePath : requestedPath).fileName();
     const QString resolvedUrl = QUrl::fromLocalFile(absolutePath).toString();
+    SearchService::noteImageStored(absolutePath);
 
     // 记录先到的情况：补写实际路径。仅限最近 1 小时、尚未关联的记录，
     // 避免升级前的历史记录（image_path 均为空）被同名新图误关联
@@ -474,6 +476,7 @@ bool AppController::applyFtpConfiguration(const QString &root, int port)
     const bool running = m_ftpRunning;
     if (running) ftpStop();
     m_archiveDirectory = normalized; m_ftpPort = port;
+    SearchService::clearImageLookupCache();
     // 程序目录内的路径按相对路径保存，安装目录整体搬迁后仍然有效
     m_imageDirSetting = AgcUtils::toAppRelativePath(normalized);
     bool success = !running || ftpListen(port, normalized);

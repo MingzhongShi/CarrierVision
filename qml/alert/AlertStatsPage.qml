@@ -549,6 +549,11 @@ Page {
                             source: root.currentImage.url || ""
                             fillMode: Image.PreserveAspectFit
                             asynchronous: true
+                            // 按显示尺寸的 2 倍解码且不进共享缓存：逐张翻看时不再按相机原图分辨率解码（原图在点击后的查看器中打开）
+                            cache: false
+                            smooth: true
+                            sourceSize.width: Math.min(4096, Math.max(1, width * 2))
+                            sourceSize.height: Math.min(4096, Math.max(1, height * 2))
                             visible: root.imageRequestId === -1
                             MouseArea {
                                 anchors.fill: parent

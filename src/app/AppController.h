@@ -317,6 +317,8 @@ private:
     QTimer m_serviceRetryTimer;
     bool m_ftpStoppedByUser = false;
     bool m_tcpStoppedByUser = false;
+    QTimer m_warnNotifyTimer;
+    std::atomic_bool m_warnNotifyPending{false};
     std::atomic<int> m_searchGeneration{0};
     std::atomic<int> m_alertSearchGeneration{0};
 };
