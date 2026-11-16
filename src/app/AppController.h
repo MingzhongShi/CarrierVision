@@ -105,6 +105,8 @@ public:
     Q_INVOKABLE bool tcpRunning() const;
     Q_INVOKABLE int tcpPort() const;
     Q_INVOKABLE int tcpClientCount() const;
+    // 上次异常退出后在维护线程中做一次完整性检查（启动时不再同步检查整个库）；不通过时标记，提示重启后恢复
+    void scheduleIntegrityCheck();
     Q_SLOT void onFtpImageStored(const QString &filePath, const QString &requestedPath);
     Q_INVOKABLE QString ftpUser() const;
     Q_INVOKABLE QString ftpRoot() const;
@@ -241,7 +243,10 @@ private:
     void startMaintenance(bool emergency);
     void checkStorage();
     QStringList storagePaths() const;
-    bool processTcpBatch(const QJsonObject &batchData, QString &error);
+    void submitTcpBatch(const QJsonObject &batchData, TcpDataReceiver::BatchDone done);
+    void finishTcpBatch(const ImageIngest::BatchData &batch, const QStringList &consumed, QVector<ImageItem> cards,
+                        bool ok, const QString &error, const TcpDataReceiver::BatchDone &done);
+    void finishImageLink(const QString &requestedName, const QString &absolutePath, int linkedRows, const QString &linkError);
     void flushImageIngestLog();
 
     QString m_sourceDirectory;
@@ -297,6 +302,8 @@ private:
     int m_gearSumGeneration = 0;
     QThreadPool m_maintenancePool;
     QThreadPool m_exportPool;
+    // 检测数据写库（批次入库、图片路径回填）：单线程保证按到达顺序执行
+    QThreadPool m_writePool;
     int m_imageSaveSeq = 0;
     QString m_lastImageSaveDir;
     int m_logExportSeq = 0;

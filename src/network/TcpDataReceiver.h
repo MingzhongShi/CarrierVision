@@ -36,6 +36,10 @@ public:
     // Synchronous commit hook. Returning true means the message has been
     // durably accepted and may be acknowledged to the sender.
     std::function<bool(const QJsonObject &, QString &)> batchHandler;
+    // 异步提交：入库在其他线程完成后调用 done（必须回到本对象所在线程调用）。设置后优先于 batchHandler。
+    // 同一连接的报文按到达顺序提交，done 也须按提交顺序调用，回包顺序与报文顺序一致。
+    using BatchDone = std::function<void(bool accepted, const QString &error)>;
+    std::function<void(const QJsonObject &, BatchDone)> asyncBatchHandler;
 
 signals:
     void runningChanged(bool running);
@@ -57,6 +61,7 @@ private:
     void dropClient(QTcpSocket *sock, const QString &reason);
     void handleLine(QTcpSocket *sock, const QByteArray &line);
     void reply(QTcpSocket *sock, const QByteArray &line);
+    void replyResult(QTcpSocket *sock, int carrierId, qsizetype wheelCount, bool accepted, const QString &error);
     void rejectConnection(QTcpSocket *sock, const QByteArray &message);
 
     static constexpr int MaxClients = 32;

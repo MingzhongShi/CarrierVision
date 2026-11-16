@@ -1209,6 +1209,45 @@ private slots:
         QVERIFY(response.value("message").toString().contains("database"));
         receiver.stop();
     }
+    void tcpReceiverAsyncHandlerRepliesInOrderAfterCommit() {
+        // 异步入库：完成后才回包，同一连接的多条报文按到达顺序回包
+        TcpDataReceiver receiver;
+        QList<TcpDataReceiver::BatchDone> pending;
+        receiver.asyncBatchHandler = [&](const QJsonObject &, TcpDataReceiver::BatchDone done) {
+            pending << std::move(done);
+        };
+        QVERIFY(receiver.listen(QHostAddress::LocalHost, 0));
+        QTcpSocket client;
+        client.connectToHost(QHostAddress::LocalHost, receiver.port());
+        QVERIFY(client.waitForConnected(3000));
+        for (int carrier : {3, 4}) {
+            QJsonObject root{{"carrierId", carrier}, {"wheels", QJsonArray{QJsonObject{{"wheelId", 1}, {"result", "OK"}}}}};
+            client.write(QJsonDocument(root).toJson(QJsonDocument::Compact) + '\n');
+        }
+        QTRY_COMPARE_WITH_TIMEOUT(pending.size(), 2, 3000);
+        QTest::qWait(50);
+        QVERIFY(!client.canReadLine()); // 提交完成前不回包
+        pending.at(0)(true, QString());
+        pending.at(1)(false, QStringLiteral("disk full"));
+        QTRY_VERIFY_WITH_TIMEOUT(client.canReadLine(), 3000);
+        const QJsonObject first = QJsonDocument::fromJson(client.readLine()).object();
+        QCOMPARE(first.value("status").toString(), QString("OK"));
+        QCOMPARE(first.value("carrierId").toInt(), 3);
+        QTRY_VERIFY_WITH_TIMEOUT(client.canReadLine(), 3000);
+        const QJsonObject second = QJsonDocument::fromJson(client.readLine()).object();
+        QCOMPARE(second.value("status").toString(), QString("ERROR"));
+        QVERIFY(second.value("message").toString().contains("disk full"));
+
+        // 入库期间连接断开：回调只丢弃回包，不访问已释放的连接
+        QJsonObject root{{"carrierId", 5}, {"wheels", QJsonArray{QJsonObject{{"wheelId", 1}, {"result", "OK"}}}}};
+        client.write(QJsonDocument(root).toJson(QJsonDocument::Compact) + '\n');
+        QTRY_COMPARE_WITH_TIMEOUT(pending.size(), 3, 3000);
+        client.disconnectFromHost();
+        QTRY_COMPARE_WITH_TIMEOUT(receiver.clientCount(), 0, 3000);
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        pending.at(2)(true, QString());
+        receiver.stop();
+    }
     void ftpStoresRootUploadsInDateSubdirectory() {
         // 传到根目录的图片按接收日期分子目录落盘，客户端指定的子目录不变
         QTemporaryDir dir; FtpServer server; QString error; QStringList stored;

@@ -3,6 +3,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
+#include <QPointer>
 
 TcpDataReceiver::TcpDataReceiver(QObject *parent)
     : QObject(parent)
@@ -212,6 +213,17 @@ void TcpDataReceiver::handleLine(QTcpSocket *sock, const QByteArray &line)
 
     LOG_DEBUG("[TCP] 收到载具 {} 数据包, 包含 {} 轮检测数据", carrierId, wheels.size());
     emit logMessage(QStringLiteral("[TCP] 收到载具 %1 数据包 (轮数=%2)").arg(carrierId).arg(wheels.size()));
+    if (asyncBatchHandler) {
+        const QPointer<QTcpSocket> guard(sock);
+        const qsizetype wheelCount = wheels.size();
+        asyncBatchHandler(obj, [this, guard, carrierId, wheelCount](bool accepted, const QString &error) {
+            // 入库期间连接可能已断开（套接字已释放或已移出连接表），此时只丢弃回包
+            if (!guard || !m_clientBuffers.contains(guard.data())) return;
+            replyResult(guard.data(), carrierId, wheelCount, accepted, error);
+        });
+        return;
+    }
+
     QString processingError;
     bool accepted = true;
     if (batchHandler) {
@@ -220,18 +232,22 @@ void TcpDataReceiver::handleLine(QTcpSocket *sock, const QByteArray &line)
         emit dataBatchReceived(obj);
     }
     if (!m_clientBuffers.contains(sock)) return; // 处理期间连接已断开
+    replyResult(sock, carrierId, wheels.size(), accepted, processingError);
+}
 
+void TcpDataReceiver::replyResult(QTcpSocket *sock, int carrierId, qsizetype wheelCount, bool accepted, const QString &error)
+{
     if (!accepted) {
         const QJsonObject errorObject{
             {QStringLiteral("status"), QStringLiteral("ERROR")},
-            {QStringLiteral("message"), processingError.left(512)}
+            {QStringLiteral("message"), error.left(512)}
         };
         reply(sock, QJsonDocument(errorObject).toJson(QJsonDocument::Compact) + '\n');
         return;
     }
 
     reply(sock, QStringLiteral("{\"status\":\"OK\",\"carrierId\":%1,\"wheelCount\":%2}\n")
-                    .arg(carrierId).arg(wheels.size()).toUtf8());
+                    .arg(carrierId).arg(wheelCount).toUtf8());
 }
 
 void TcpDataReceiver::onClientDisconnected()

@@ -175,9 +175,20 @@ int main(int argc, char *argv[])
     const QString runningMarker = DatabaseGuard::runningMarkerPath(dbPath);
     const QString checkMarker = DatabaseGuard::corruptMarkerPath(dbPath);
     const bool uncleanExit = QFile::exists(runningMarker);
+    const bool checkRequired = QFile::exists(checkMarker);
+    // 仅异常退出（日常检查未发现损坏）时，完整性检查改在窗口显示后于后台执行：quick_check 要读完整个库，
+    // 数 GB 的现场库在机械盘上需要数十秒到数分钟，此前这段时间程序没有任何界面。
+    // 后台检查不通过时写入损坏标记，提示重启，下次启动按原流程同步检查并从备份恢复。
+    const bool deferIntegrityCheck = uncleanExit && !checkRequired;
     if (uncleanExit)
-        LOG_WARN("检测到上次程序未正常退出（崩溃、断电或被强制结束），启动前检查数据库完整性");
-    if (uncleanExit || QFile::exists(checkMarker)) {
+        LOG_WARN("检测到上次程序未正常退出（崩溃、断电或被强制结束），启动后在后台检查数据库完整性");
+    // 后台检查之前数据库就打不开或无法初始化时，标记为需要检查，下次启动先检查并恢复
+    auto markCheckRequired = [&]() {
+        if (!deferIntegrityCheck) return;
+        QFile marker(checkMarker);
+        if (marker.open(QIODevice::WriteOnly)) marker.write("startup failed after unclean exit");
+    };
+    if (checkRequired) {
         const QString recovery = DatabaseGuard::recoverIfCorrupt(
             dbPath, QFileInfo(dbPath).absolutePath() + QStringLiteral("/backup"));
         if (!recovery.isEmpty()) LOG_CRITICAL("{}", recovery.toStdString());
@@ -189,6 +200,7 @@ int main(int argc, char *argv[])
         QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE");
         db.setDatabaseName(dbPath);
         if (!db.open()) {
+            markCheckRequired();
             return showFatalError(app, QStringLiteral("无法打开主数据库"),
                                   QStringLiteral("数据库文件：%1\n错误：%2\n请检查磁盘空间、文件权限，或数据库是否被其他程序占用。")
                                       .arg(QDir::toNativeSeparators(dbPath), db.lastError().text()));
@@ -227,6 +239,7 @@ int main(int argc, char *argv[])
 
             // 集中创建所有表结构
             if(!DBSchema::ensureAllTables(db)){
+                markCheckRequired();
                 return showFatalError(app, QStringLiteral("数据库表结构初始化失败"),
                                       QStringLiteral("数据库文件：%1\n请查看日志中 DBSchema 开头的错误；数据库可能已损坏或磁盘已满。")
                                           .arg(QDir::toNativeSeparators(dbPath)));
@@ -247,6 +260,7 @@ int main(int argc, char *argv[])
         qRegisterMetaType<CopyTask>("CopyTask");
 
         AppController controller;
+        if (deferIntegrityCheck) controller.scheduleIntegrityCheck();
 
         QObject::connect(&app, &QCoreApplication::aboutToQuit, [&controller]() {
             LOG_INFO("应用程序即将退出，停止后台服务");
