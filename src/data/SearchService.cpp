@@ -171,9 +171,10 @@ QString resolveRecordImage(const QString &imagePath, const QString &imageName,
                            const QString &archiveDir, const QString &sourceDir,
                            const QString &createTime)
 {
-    // 1. 记录中的实际落盘路径（所在目录已不存在时不再访问文件本身）
-    if (!imagePath.isEmpty() && QFileInfo(imagePath).isAbsolute()) {
-        const QString stored = existingFile(imagePath);
+    // 1. 记录中的实际落盘路径：新记录为相对图像根目录的路径，旧记录为绝对路径（所在目录已不存在时不再访问文件本身）
+    const QString recorded = AgcUtils::imagePathFromRecord(imagePath, archiveDir);
+    if (!recorded.isEmpty()) {
+        const QString stored = existingFile(recorded);
         if (!stored.isEmpty()) return stored;
     }
 

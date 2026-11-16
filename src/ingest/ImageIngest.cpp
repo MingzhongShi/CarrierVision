@@ -253,7 +253,7 @@ bool parseBatchJson(const QJsonObject &obj, BatchData &out, QString &error, cons
     return true;
 }
 
-bool recordBatch(QSqlDatabase db, const BatchData &batch, QString &error)
+bool recordBatch(QSqlDatabase db, const BatchData &batch, QString &error, const QString &imageRoot)
 {
     for (const WheelItem &wheel : batch.wheels) {
         if (wheel.wheelId < 1 || wheel.wheelId > 16) {
@@ -324,7 +324,8 @@ bool recordBatch(QSqlDatabase db, const BatchData &batch, QString &error)
         q.bindValue(QStringLiteral(":dev"), std::isfinite(wheel.deviation) ? QVariant(wheel.deviation) : QVariant());
         q.bindValue(QStringLiteral(":image"), wheel.imageName);
         q.bindValue(QStringLiteral(":batch"), batch.batchId);
-        q.bindValue(QStringLiteral(":path"), wheel.imagePath.isEmpty() ? QVariant() : QVariant(wheel.imagePath));
+        q.bindValue(QStringLiteral(":path"), wheel.imagePath.isEmpty()
+            ? QVariant() : QVariant(AgcUtils::toImageRootRelative(wheel.imagePath, imageRoot)));
 
         if (!q.exec()) {
             error = q.lastError().text();
@@ -343,7 +344,7 @@ bool recordBatch(QSqlDatabase db, const BatchData &batch, QString &error)
 }
 
 int linkRecordImage(QSqlDatabase db, const QString &imageName, const QString &absolutePath,
-                    const QDateTime &since, QString &error)
+                    const QDateTime &since, QString &error, const QString &imageRoot)
 {
     QSqlQuery update(db);
     update.prepare(QStringLiteral(
@@ -353,7 +354,7 @@ int linkRecordImage(QSqlDatabase db, const QString &imageName, const QString &ab
         // image_path 索引，逐行扫描全部未关联图片的历史记录（升级前的记录全部为空），
         // 记录越多越慢，且在主线程上每收到一张图执行一次。表达式形式只走最近 1 小时的时间索引
         "AND COALESCE(image_path, '') = ''"));
-    update.bindValue(QStringLiteral(":path"), absolutePath);
+    update.bindValue(QStringLiteral(":path"), AgcUtils::toImageRootRelative(absolutePath, imageRoot));
     update.bindValue(QStringLiteral(":since"), AgcUtils::formatDateTime(since));
     update.bindValue(QStringLiteral(":name"), imageName);
     if (!update.exec()) {

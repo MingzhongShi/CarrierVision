@@ -1,6 +1,7 @@
 #include "data/ArchiveMaintenance.h"
 #include "common/AgcUtils.h"
 #include "common/AppLogger.h"
+#include "data/DbSchema.h"
 #include <QDir>
 #include <QDirIterator>
 #include <QRegularExpression>
@@ -13,6 +14,7 @@
 #include <QHash>
 #include <QStandardPaths>
 #include <QCoreApplication>
+#include <QThread>
 
 namespace {
 constexpr int kBatchSize = 500;
@@ -39,14 +41,17 @@ bool safeFile(const QString &path, const QStringList &roots)
     return false;
 }
 
-// 文件是否仍被记录引用：按实际路径，或按图片名（仅限尚未关联实际路径的记录）
-bool referenced(QSqlDatabase &db, const QString &path, const QString &name, bool &ok)
+// 文件是否仍被记录引用：按实际路径（新记录存相对图像根目录的路径，旧记录及迁移前为绝对路径，两种都查），
+// 或按图片名（仅限尚未关联实际路径的记录）
+bool referenced(QSqlDatabase &db, const QString &path, const QString &relative, const QString &name, bool &ok)
 {
     QSqlQuery refs(db);
     refs.prepare("SELECT 1 FROM record WHERE image_path=:path "
+                 "UNION ALL SELECT 1 FROM record WHERE image_path=:rel "
                  "UNION ALL SELECT 1 FROM record WHERE imagename=:name AND (image_path IS NULL OR image_path='') "
                  "LIMIT 1");
     refs.bindValue(":path", path);
+    refs.bindValue(":rel", relative);
     refs.bindValue(":name", name);
     ok = refs.exec();
     const bool found = ok && refs.next();
@@ -191,7 +196,9 @@ bool ArchiveMaintenance::cleanup(QSqlDatabase db, const QString &archiveRoot,
     groups.reserve(keys.size());
     for (const auto &key : keys) {
         const bool pathKey = pathKeys.contains(key);
-        const QString path = QDir::cleanPath(pathKey ? key : QDir(archiveRoot).absoluteFilePath(key));
+        // image_path 可能是相对图像根目录的路径（新记录）或绝对路径（旧记录），统一转为绝对路径
+        const QString path = pathKey ? AgcUtils::imagePathFromRecord(key, archiveRoot)
+                                     : QDir::cleanPath(QDir(archiveRoot).absoluteFilePath(key));
         if (QFileInfo::exists(path + ".cv-pending")) continue; // 上传提交中，下轮再处理
         groups.append({key, path, !key.isEmpty() && safeFile(path, roots)});
     }
@@ -266,7 +273,8 @@ bool ArchiveMaintenance::cleanup(QSqlDatabase db, const QString &archiveRoot,
         const auto &path = file.first;
         if (!safeFile(path, roots) || QFileInfo::exists(path + ".cv-pending")) { success = false; continue; }
         bool refsOk = false;
-        const bool isReferenced = referenced(db, path, file.second, refsOk);
+        const bool isReferenced = referenced(db, path, AgcUtils::toImageRootRelative(path, archiveRoot),
+                                             file.second, refsOk);
         if (!refsOk) { success = false; continue; }
         if (!isReferenced && QFileInfo::exists(path) && !QFile::remove(path)) { success = false; continue; }
         finished << path;
@@ -339,8 +347,10 @@ int ArchiveMaintenance::sweepOrphans(QSqlDatabase db, const QStringList &managed
                 // 按实际路径或文件名任一被引用都保留（文件名匹配比清理更保守，覆盖未关联路径的历史记录）
                 QSqlQuery refs(db);
                 refs.prepare("SELECT 1 FROM record WHERE image_path=:path UNION ALL "
+                             "SELECT 1 FROM record WHERE image_path=:rel UNION ALL "
                              "SELECT 1 FROM record WHERE imagename=:name LIMIT 1");
                 refs.bindValue(":path", path);
+                refs.bindValue(":rel", AgcUtils::toImageRootRelative(path, root));
                 refs.bindValue(":name", info.fileName());
                 if (!refs.exec()) { error = refs.lastError().text(); return deleted; }
                 const bool used = refs.next();
@@ -354,4 +364,89 @@ int ArchiveMaintenance::sweepOrphans(QSqlDatabase db, const QStringList &managed
         }
     }
     return deleted;
+}
+
+ArchiveMaintenance::ImagePathMigration ArchiveMaintenance::migrateImagePathsToRelative(
+    QSqlDatabase db, const QString &imageRoot, const std::atomic_bool *stop, int batchRows, int pauseMs)
+{
+    ImagePathMigration result;
+    if (!db.isOpen() || imageRoot.trimmed().isEmpty()) {
+        result.ok = false;
+        result.error = QStringLiteral("数据库不可用或图像目录未设置");
+        return result;
+    }
+    if (DBSchema::getConfigBool(db, QString::fromLatin1(kImagePathMigrationDoneKey), false)) {
+        result.done = true;
+        return result;
+    }
+    batchRows = qMax(1, batchRows);
+    bool rowOk = false;
+    qint64 lastRowId = DBSchema::getConfig(db, QString::fromLatin1(kImagePathMigrationRowKey)).toLongLong(&rowOk);
+    if (!rowOk || lastRowId < 0) lastRowId = 0;
+
+    auto fail = [&](const QString &reason) {
+        result.ok = false;
+        result.error = reason;
+        db.rollback();
+        return result;
+    };
+    while (!(stop && stop->load())) {
+        // BEGIN IMMEDIATE 先拿写锁：读取与改写在同一快照内完成，写库线程同时补写的路径不会被覆盖
+        QSqlQuery begin(db);
+        if (!begin.exec(QStringLiteral("BEGIN IMMEDIATE"))) {
+            result.ok = false;
+            result.error = begin.lastError().text();
+            return result;
+        }
+        begin.finish();
+
+        QSqlQuery maxQuery(db);
+        if (!maxQuery.exec(QStringLiteral("SELECT COALESCE(MAX(rowid), 0) FROM record")) || !maxQuery.next())
+            return fail(maxQuery.lastError().text());
+        const qint64 maxRowId = maxQuery.value(0).toLongLong();
+        maxQuery.finish();
+        const qint64 upper = lastRowId + batchRows;
+
+        // 按 rowid 区间取，而不是 "image_path 非空 LIMIT n"：升级前的大量记录 image_path 为空，
+        // 后者每批都要从断点扫过这些行，写锁持有时间不可控
+        QSqlQuery select(db);
+        select.prepare(QStringLiteral("SELECT rowid, image_path FROM record WHERE rowid > :lo AND rowid <= :hi "
+                                      "AND COALESCE(image_path, '') <> ''"));
+        select.bindValue(QStringLiteral(":lo"), lastRowId);
+        select.bindValue(QStringLiteral(":hi"), upper);
+        if (!select.exec()) return fail(select.lastError().text());
+        QList<QPair<qint64, QString>> changes;
+        while (select.next()) {
+            const QString stored = select.value(1).toString();
+            const QString relative = AgcUtils::toImageRootRelative(stored, imageRoot);
+            if (relative != stored) changes.append({select.value(0).toLongLong(), relative});
+        }
+        select.finish();
+
+        QSqlQuery update(db);
+        update.prepare(QStringLiteral("UPDATE record SET image_path = :path WHERE rowid = :id"));
+        for (const auto &change : std::as_const(changes)) {
+            update.bindValue(QStringLiteral(":path"), change.second);
+            update.bindValue(QStringLiteral(":id"), change.first);
+            if (!update.exec()) return fail(update.lastError().text());
+        }
+        update.finish();
+
+        const bool finished = upper >= maxRowId;
+        if (!DBSchema::setConfig(db, QString::fromLatin1(kImagePathMigrationRowKey), QString::number(qMin(upper, maxRowId)))
+            || (finished && !DBSchema::setConfig(db, QString::fromLatin1(kImagePathMigrationDoneKey), QStringLiteral("1"))))
+            return fail(QStringLiteral("保存迁移进度失败"));
+        if (!db.commit()) return fail(db.lastError().text());
+
+        lastRowId = qMin(upper, maxRowId);
+        result.converted += changes.size();
+        ++result.batches;
+        if (finished) {
+            result.done = true;
+            break;
+        }
+        // 批次之间让出写锁，TCP 入库与图片回填不会被长时间阻塞
+        if (pauseMs > 0) QThread::msleep(static_cast<unsigned long>(pauseMs));
+    }
+    return result;
 }

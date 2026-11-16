@@ -365,6 +365,7 @@ AppController::AppController(QObject *parent)
 
 AppController::~AppController()
 {
+    m_shuttingDown = true;
     stopFtpServer();
     FtpIngestService *service = m_ftpService;
     QMetaObject::invokeMethod(service, [service]() { service->shutdown(); }, Qt::BlockingQueuedConnection);

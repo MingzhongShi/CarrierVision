@@ -421,6 +421,25 @@ void AppController::setCleanupRunHour(int hour)
 
 // 每分钟检查一次定时任务：与 system_config 中记录的上次执行日期比较，
 // 不受系统改时间、休眠唤醒影响，程序关闭期间错过的任务会在启动后补跑
+namespace {
+// 首次迁移图片路径前另存一份备份：不参与每日备份轮换（只保留 3 份），迁移出问题时可随时用它回滚。
+// 已存在则保留最早的那份。先写临时文件再改名，避免留下复制了一半的文件
+bool keepPreMigrationBackup(const QString &backupPath, const QString &backupDir, QString &error)
+{
+    const QString target = QDir(backupDir).filePath(QStringLiteral("before-image-path-relative.db"));
+    if (QFileInfo::exists(target)) return true;
+    const QString temp = target + QStringLiteral(".partial");
+    QFile::remove(temp);
+    if (!QFile::copy(backupPath, temp) || !QFile::rename(temp, target)) {
+        QFile::remove(temp);
+        error = QStringLiteral("无法复制 %1 到 %2").arg(backupPath, target);
+        return false;
+    }
+    LOG_INFO("[DB] 已保存图片路径迁移前的数据库备份: {}", target.toStdString());
+    return true;
+}
+} // namespace
+
 void AppController::runScheduledTasks()
 {
     const QDateTime now = QDateTime::currentDateTime();
@@ -455,13 +474,33 @@ void AppController::runScheduledTasks()
         const QString dbPath = DBSchema::defaultDatabasePath();
         const QString backupDir = QFileInfo(dbPath).absolutePath() + QStringLiteral("/backup");
         const bool lowDisk = m_storageLevel >= StorageMonitor::Level::Warn;
-        (void)QtConcurrent::run(&m_maintenancePool, [this, dbPath, backupDir, lowDisk, today]() {
+        const QString imageRoot = m_archiveDirectory;
+        (void)QtConcurrent::run(&m_maintenancePool, [this, dbPath, backupDir, lowDisk, today, imageRoot]() {
             QSqlDatabase db = getThreadDatabase();
             QString detail;
             const bool healthy = DatabaseGuard::quickCheck(db, detail);
             QString backupError, backupPath;
             const bool backedUp = healthy && !lowDisk && DatabaseGuard::backup(db, backupDir, 3, backupError, &backupPath);
+            // 旧库图片路径改存相对路径：只在当天备份成功之后进行，分批执行、可中断续跑（见 ArchiveMaintenance）
+            ArchiveMaintenance::ImagePathMigration migration;
+            bool migrationRan = false;
+            QString keepError;
+            if (backedUp && !imageRoot.isEmpty()
+                && !DBSchema::getConfigBool(db, QString::fromLatin1(ArchiveMaintenance::kImagePathMigrationDoneKey), false)) {
+                if (keepPreMigrationBackup(backupPath, backupDir, keepError)) {
+                    migration = ArchiveMaintenance::migrateImagePathsToRelative(db, imageRoot, &m_shuttingDown);
+                    migrationRan = true;
+                }
+            }
             QMetaObject::invokeMethod(this, [=]() {
+                if (!keepError.isEmpty())
+                    LOG_ERROR("[DB] 保存迁移前备份失败，暂不迁移图片路径: {}", keepError.toStdString());
+                if (migrationRan && !migration.ok)
+                    LOG_ERROR("[DB] 图片路径迁移中断（已完成部分保留，明天从断点继续）: {}", migration.error.toStdString());
+                else if (migrationRan && migration.done)
+                    LOG_INFO("[DB] 图片路径已全部改存为相对图像目录的路径：本次改写 {} 条（{} 批）", migration.converted, migration.batches);
+                else if (migrationRan)
+                    LOG_INFO("[DB] 图片路径迁移暂停（程序退出），本次改写 {} 条，下次从断点继续", migration.converted);
                 m_backupRunning = false;
                 if (!healthy) {
                     // 运行中无法替换数据库：标记后由下次启动自动检查并从备份恢复
