@@ -7,6 +7,7 @@
 #include <QDir>
 #include <QFile>
 #include <QSettings>
+#include <QElapsedTimer>
 #include <nlohmann/json.hpp>
 
 QString DBSchema::defaultDatabasePath() {
@@ -339,13 +340,40 @@ bool DBSchema::ensureAllTables(QSqlDatabase &db){
         LOG_ERROR("DBSchema: {}失败: {}", operation, q.lastError().text().toStdString());
         return false;
     };
+    // 统计、查询页按日期范围或载具/轮位聚合 result 与处置状态。索引只含筛选列时每命中一行都要回表读整行，
+    // 一周约 28 万行，范围越大越慢且在机械盘/冷缓存下尤其明显。时间索引和载具轮号索引带上这些列后
+    // 聚合与 COUNT 只读索引页。旧库在首次启动时替换旧索引（一次性，28 万行约 1～2 秒）。
+    // batch_id 从不作为查询条件，其索引只占空间（约占库 7%）并拖慢写入，删除。
     if (!execRequired("CREATE INDEX IF NOT EXISTS idx_record_carrier_time ON record(carrier_id, createtime DESC)", "创建载具时间索引")
-        || !execRequired("CREATE INDEX IF NOT EXISTS idx_record_carrier_wheel ON record(carrier_id, wheel_id, createtime DESC)", "创建载具轮号索引")
-        || !execRequired("CREATE INDEX IF NOT EXISTS idx_record_createtime ON record(createtime DESC)", "创建时间索引")
-        || !execRequired("CREATE INDEX IF NOT EXISTS idx_record_batch ON record(batch_id)", "创建批次索引")
         || !execRequired("CREATE INDEX IF NOT EXISTS idx_record_image ON record(imagename)", "创建图片名索引")
         || !execRequired("CREATE INDEX IF NOT EXISTS idx_record_image_path ON record(image_path)", "创建图片路径索引")) {
         return false;
+    }
+    {
+        bool needsMigration = false;
+        QSqlQuery existing(db);
+        if (existing.exec(QStringLiteral(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND tbl_name='record' AND name IN "
+                "('idx_record_createtime','idx_record_carrier_wheel','idx_record_batch')"))
+            && existing.next()) {
+            needsMigration = existing.value(0).toInt() > 0;
+        }
+        existing.finish();
+        QElapsedTimer timer;
+        timer.start();
+        if (!execRequired("CREATE INDEX IF NOT EXISTS idx_record_time_cover ON record("
+                          "createtime DESC, carrier_id, wheel_id, result, is_handled, is_false_alarm)", "创建时间覆盖索引")
+            || !execRequired("CREATE INDEX IF NOT EXISTS idx_record_carrier_wheel_cover ON record("
+                             "carrier_id, wheel_id, createtime DESC, result, is_handled, is_false_alarm)", "创建载具轮号覆盖索引")
+            || !execRequired("DROP INDEX IF EXISTS idx_record_createtime", "删除旧时间索引")
+            || !execRequired("DROP INDEX IF EXISTS idx_record_carrier_wheel", "删除旧载具轮号索引")
+            || !execRequired("DROP INDEX IF EXISTS idx_record_batch", "删除批次索引")) {
+            return false;
+        }
+        if (needsMigration) {
+            LOG_INFO("DBSchema: 检测记录索引已升级为覆盖索引并删除批次索引，耗时 {} ms（删除释放的空间由后续写入复用）",
+                     timer.elapsed());
+        }
     }
 
     if (!q.exec("CREATE TABLE IF NOT EXISTS cleanup_files(path TEXT PRIMARY KEY, imagename TEXT NOT NULL)")) return false;

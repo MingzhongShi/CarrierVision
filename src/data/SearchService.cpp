@@ -471,7 +471,7 @@ QVariantMap latestWheelImage(const QSqlDatabase &db, int rackNumber, int wheelNu
     if (rackNumber < 1 || rackNumber > 50 || wheelNumber < 1 || wheelNumber > 16) return image;
     if (!db.isValid() || !db.isOpen()) return image;
 
-    // 走 idx_record_carrier_wheel(carrier_id, wheel_id, createtime DESC)
+    // 走 idx_record_carrier_wheel_cover(carrier_id, wheel_id, createtime DESC, ...)
     QSqlQuery query(db);
     query.prepare(QStringLiteral(
         "SELECT imagename, createtime, result, image_path FROM record "

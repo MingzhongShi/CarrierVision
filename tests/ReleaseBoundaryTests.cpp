@@ -703,9 +703,49 @@ private slots:
         QCOMPARE(q.value(5).toInt(), 1);
         QCOMPARE(q.value(6).toString(), QString("BATCH_1_2026-09-05 12:00:00"));
 
-        // verify index exists
+        // batch_id 从不作为查询条件，不再建索引
         QVERIFY(q.exec("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_record_batch'"));
-        QVERIFY(q.next());
+        QVERIFY(!q.next());
+    }
+    void recordIndexesCoverRangeStatistics() {
+        // 模拟旧库：仅有旧索引，ensureAllTables 应替换为覆盖索引
+        QSqlQuery q(db);
+        QVERIFY(q.exec("DROP INDEX IF EXISTS idx_record_time_cover"));
+        QVERIFY(q.exec("DROP INDEX IF EXISTS idx_record_carrier_wheel_cover"));
+        QVERIFY(q.exec("CREATE INDEX idx_record_createtime ON record(createtime DESC)"));
+        QVERIFY(q.exec("CREATE INDEX idx_record_carrier_wheel ON record(carrier_id, wheel_id, createtime DESC)"));
+        QVERIFY(q.exec("CREATE INDEX idx_record_batch ON record(batch_id)"));
+        QVERIFY(DBSchema::ensureAllTables(db));
+
+        QStringList names;
+        QVERIFY(q.exec("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='record'"));
+        while (q.next()) names << q.value(0).toString();
+        QVERIFY(names.contains("idx_record_time_cover"));
+        QVERIFY(names.contains("idx_record_carrier_wheel_cover"));
+        QVERIFY(!names.contains("idx_record_createtime"));
+        QVERIFY(!names.contains("idx_record_carrier_wheel"));
+        QVERIFY(!names.contains("idx_record_batch"));
+
+        // 统计页、查询页与报警页的日期范围聚合只读索引，不回表
+        const auto plan = [&](const QString &sql) {
+            QSqlQuery explain(db);
+            if (!explain.exec("EXPLAIN QUERY PLAN " + sql)) return explain.lastError().text();
+            QStringList details;
+            while (explain.next()) details << explain.value(3).toString();
+            return details.join(" | ");
+        };
+        const QString range = "createtime >= '2026-11-01 00:00:00' AND createtime <= '2026-11-07 23:59:59'";
+        for (const QString &sql : {
+                 "SELECT carrier_id, SUM(CASE WHEN result = 1 THEN 1 ELSE 0 END) FROM record WHERE " + range
+                     + " AND wheel_id BETWEEN 9 AND 16 GROUP BY carrier_id",
+                 "SELECT COUNT(*) FROM record WHERE wheel_id BETWEEN 1 AND 16 AND " + range,
+                 "SELECT carrier_id, COUNT(*), SUM(is_handled), SUM(is_false_alarm) FROM record WHERE wheel_id BETWEEN 1 AND 16 AND "
+                     + range + " AND result = 0 GROUP BY carrier_id",
+                 QString("SELECT COUNT(*), SUM(CASE WHEN result = 0 THEN 1 ELSE 0 END) FROM record "
+                         "WHERE carrier_id = 3 AND wheel_id BETWEEN 1 AND 16")}) {
+            const QString detail = plan(sql);
+            QVERIFY2(detail.contains("COVERING INDEX"), qPrintable(sql + " -> " + detail));
+        }
     }
     void tcpDataReceiverPacketParsing() {
         TcpDataReceiver receiver;
