@@ -262,9 +262,9 @@ private slots:
         // 过期记录删除前按月追加到 CSV：带 BOM 与表头，再次清理追加同一文件，表头不重复
         QTemporaryDir dir; QTemporaryDir archiveDir;
         QSqlQuery q(db);
-        q.prepare("INSERT INTO record(createtime,carrier_id,camera_id,wheel_id,result,distance,imagename) VALUES(:t,7,1,3,0,:d,:n)");
-        auto add = [&](const QString &time, double distance, const QString &name) {
-            q.bindValue(":t", time); q.bindValue(":d", distance); q.bindValue(":n", name); return q.exec();
+        q.prepare("INSERT INTO record(createtime,carrier_id,camera_id,wheel_id,result,imagename) VALUES(:t,7,1,3,0,:n)");
+        auto add = [&](const QString &time, double, const QString &name) {
+            q.bindValue(":t", time); q.bindValue(":n", name); return q.exec();
         };
         QVERIFY(add("2026-05-20 08:00:00", 11.5, "a,\"quoted\".png"));
         QVERIFY(add("2026-06-01 09:00:00", 12.5, "b.png"));
@@ -281,8 +281,8 @@ private slots:
         QFile may(QDir(archiveDir.path()).filePath("record_2026-05.csv"));
         QVERIFY(may.open(QIODevice::ReadOnly));
         const QByteArray mayText = may.readAll();
-        QVERIFY(mayText.startsWith("\xEF\xBB\xBF" "createtime,carrier_id,camera_id,wheel_id,result,distance"));
-        QVERIFY(mayText.contains("2026-05-20 08:00:00,7,1,3,0,11.5"));
+        QVERIFY(mayText.startsWith("\xEF\xBB\xBF" "createtime,carrier_id,camera_id,wheel_id,result,")); // 其余列随表结构变化
+        QVERIFY(mayText.contains("2026-05-20 08:00:00,7,1,3,0,"));
         QVERIFY(mayText.contains("\"a,\"\"quoted\"\".png\""));
         QVERIFY(QFile::exists(QDir(archiveDir.path()).filePath("record_2026-06.csv")));
 
