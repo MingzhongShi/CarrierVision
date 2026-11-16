@@ -287,7 +287,12 @@ private slots:
                  qPrintable(error));
         QCOMPARE(stats.recordsArchived, 2);
         QCOMPARE(stats.recordsDeleted, 2);
-        QVERIFY(q.exec("SELECT imagename FROM record")); QVERIFY(q.next()); QCOMPARE(q.value(0).toString(), QString("fresh.png")); QVERIFY(!q.next());
+        {
+            // 单独的查询对象：q 仍需保留上面 prepare 的 INSERT，供下面同月再次归档使用
+            QSqlQuery check(db);
+            QVERIFY(check.exec("SELECT imagename FROM record")); QVERIFY(check.next());
+            QCOMPARE(check.value(0).toString(), QString("fresh.png")); QVERIFY(!check.next());
+        }
 
         QFile may(QDir(archiveDir.path()).filePath("record_2026-05.csv"));
         QVERIFY(may.open(QIODevice::ReadOnly));
@@ -333,6 +338,7 @@ private slots:
             QVERIFY(file.open());
             QSqlQuery q(file);
             QVERIFY(q.exec("PRAGMA journal_mode = WAL"));
+            q.finish(); // PRAGMA 返回结果行，未结束的语句会让 VACUUM 失败
             QString detail;
             QVERIFY2(DatabaseGuard::enableIncrementalVacuum(file, qint64(512) * 1024 * 1024, detail), qPrintable(detail));
             QVERIFY(DBSchema::ensureAllTables(file));

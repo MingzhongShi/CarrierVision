@@ -414,6 +414,8 @@ if(BUILD_TESTING)
         tests/CoreBoundaryTests.cpp
         src/data/StatsService.cpp
         src/data/StatsService.h
+        src/data/DatabaseGuard.cpp
+        src/data/DatabaseGuard.h
         src/data/SearchService.cpp
         src/data/SearchService.h
         src/data/SettingsStore.cpp

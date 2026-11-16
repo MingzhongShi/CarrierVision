@@ -200,6 +200,9 @@ int main(int argc, char *argv[])
             pragmaQuery.exec("PRAGMA synchronous = NORMAL;");
             // 检查点之后把 WAL 文件截断到 64 MB 以内，避免一次大批写入后 WAL 长期占用空间
             pragmaQuery.exec("PRAGMA journal_size_limit = 67108864;");
+            // PRAGMA 会返回结果行；不结束语句的话，下面切换增量回收的 VACUUM 会因
+            // "SQL statements in progress" 失败
+            pragmaQuery.finish();
 
             // 日志级别：system_config 中的 log/level 优先；未配置时发布版 info、调试版 debug
 #ifdef NDEBUG

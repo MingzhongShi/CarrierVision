@@ -220,15 +220,37 @@ bool compact(QSqlDatabase &db, const QString &dbPath, CompactResult &result, QSt
     result.freePagesBefore = info.freePages;
 
     if (info.autoVacuum == 2) {
+        // SQLite 每 step 一次 incremental_vacuum 只释放一页，而 Qt 对无结果列的语句只 step 一次，
+        // 所以一次 exec 实际只回收一页。这里在一个事务内重复执行，每轮最多回收 pagesPerStep 页，
+        // 轮与轮之间提交并让出写锁，入库不必长时间等待
+        QSqlQuery q(db);
+        if (!q.prepare(QStringLiteral("PRAGMA incremental_vacuum(1)"))) {
+            error = QStringLiteral("incremental_vacuum 失败: %1").arg(q.lastError().text());
+            return false;
+        }
         for (int step = 0; step < maxSteps && info.freePages > 0; ++step) {
-            QSqlQuery q(db);
-            if (!q.exec(QStringLiteral("PRAGMA incremental_vacuum(%1)").arg(qMax(1, pagesPerStep)))) {
-                error = QStringLiteral("incremental_vacuum 失败: %1").arg(q.lastError().text());
+            const qint64 pages = qMin<qint64>(info.freePages, qMax(1, pagesPerStep));
+            if (!db.transaction()) {
+                error = QStringLiteral("incremental_vacuum 无法开始事务: %1").arg(db.lastError().text());
                 return false;
             }
-            while (q.next()) {}
-            q.finish();
+            for (qint64 i = 0; i < pages; ++i) {
+                if (!q.exec()) {
+                    error = QStringLiteral("incremental_vacuum 失败: %1").arg(q.lastError().text());
+                    q.finish();
+                    db.rollback();
+                    return false;
+                }
+                q.finish();
+            }
+            if (!db.commit()) {
+                error = QStringLiteral("incremental_vacuum 提交失败: %1").arg(db.lastError().text());
+                db.rollback();
+                return false;
+            }
+            const qint64 before = info.freePages;
             if (!spaceInfo(db, info, error)) return false;
+            if (info.freePages >= before) break; // 没有进展（被其他连接占用等），留待下次维护
             QThread::msleep(20); // 让出写锁，入库不必长时间等待
         }
     }
