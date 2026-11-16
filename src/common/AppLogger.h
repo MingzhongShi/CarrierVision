@@ -40,6 +40,13 @@ public:
     static QVariantMap queryLogRange(const QString &startDate, const QString &endDate, const QString &level,
                                      const QString &keyword, int page, int pageSize,
                                      const QString &category = QString());
+    // 与 queryLogRange 相同的日期范围与过滤条件，按时间正序逐条回调全部匹配日志（用于导出），
+    // visitor 返回 false 时提前结束；日期无效或范围过大时返回 false 并给出原因
+    using LogVisitor = std::function<bool(const QString &time, const QString &level,
+                                          const QString &message, const QString &raw)>;
+    static bool forEachLog(const QString &startDate, const QString &endDate, const QString &level,
+                           const QString &keyword, const QString &category, const LogVisitor &visitor,
+                           QString *error = nullptr);
     static QVariantMap getLogStats();
 
     // 实时日志监听回调（level: "INFO"/"WARN"/"ERROR"/"CRITICAL", message, time）

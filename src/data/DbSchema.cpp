@@ -9,6 +9,7 @@
 #include <QFileInfo>
 #include <QSettings>
 #include <QElapsedTimer>
+#include <QSet>
 #include <nlohmann/json.hpp>
 
 QString DBSchema::defaultDatabasePath() {
@@ -269,6 +270,29 @@ static void migrateLegacyFiles(QSqlDatabase &db) {
     }
 }
 
+// 视觉端新报文的最小/最大实测与偏差值；旧库原地加可空列，历史行保持 NULL（不回填，读取时回退到 distance）
+static bool addMeasureColumns(QSqlDatabase &db, const QString &table) {
+    QSet<QString> existing;
+    QSqlQuery columns(db);
+    if (!columns.exec(QStringLiteral("PRAGMA table_info(%1)").arg(table))) {
+        LOG_ERROR("DBSchema: 读取 {} 表结构失败: {}", table.toStdString(), columns.lastError().text().toStdString());
+        return false;
+    }
+    while (columns.next()) existing.insert(columns.value(1).toString());
+    columns.finish();
+    QSqlQuery alter(db);
+    for (const QString &name : {QStringLiteral("min_value"), QStringLiteral("max_value"), QStringLiteral("deviation")}) {
+        if (existing.contains(name)) continue;
+        if (!alter.exec(QStringLiteral("ALTER TABLE %1 ADD COLUMN %2 REAL").arg(table, name))) {
+            LOG_ERROR("DBSchema: 为 {} 增加 {} 列失败: {}", table.toStdString(), name.toStdString(),
+                      alter.lastError().text().toStdString());
+            return false;
+        }
+        LOG_INFO("DBSchema: 已为 {} 表增加 {} 列", table.toStdString(), name.toStdString());
+    }
+    return true;
+}
+
 bool DBSchema::ensureAllTables(QSqlDatabase &db){
     if(!db.isOpen()){
         LOG_ERROR("DBSchema: 数据库未打开，无法校验表结构");
@@ -290,7 +314,10 @@ bool DBSchema::ensureAllTables(QSqlDatabase &db){
             lower_tolerance REAL NOT NULL DEFAULT 0.0,
             imagename TEXT NOT NULL,
             batch_id TEXT DEFAULT '',
-            image_path TEXT
+            image_path TEXT,
+            min_value REAL,
+            max_value REAL,
+            deviation REAL
         )
     )";
     if(!q.exec(createRecord)){
@@ -314,6 +341,8 @@ bool DBSchema::ensureAllTables(QSqlDatabase &db){
             LOG_INFO("DBSchema: 已为 record 表增加 image_path 列");
         }
     }
+
+    if (!addMeasureColumns(db, QStringLiteral("record"))) return false;
 
     // 人工处置独立于客户端检测结果；旧库原地加列，历史记录保持未处置。
     for (const QString &name : {QStringLiteral("is_handled"), QStringLiteral("is_false_alarm")}) {
@@ -403,6 +432,9 @@ bool DBSchema::ensureAllTables(QSqlDatabase &db){
             dist_norm REAL NOT NULL DEFAULT 0.0,
             lower_tolerance REAL NOT NULL DEFAULT 0.0,
             imagename TEXT NOT NULL,
+            min_value REAL,
+            max_value REAL,
+            deviation REAL,
             UNIQUE(carrier_id, wheel_id)
         )
     )";
@@ -410,6 +442,7 @@ bool DBSchema::ensureAllTables(QSqlDatabase &db){
         LOG_ERROR("DBSchema: 创建 alertrecord 表失败: {}", q.lastError().text().toStdString());
         return false;
     }
+    if (!addMeasureColumns(db, QStringLiteral("alertrecord"))) return false;
     if (!execRequired("CREATE INDEX IF NOT EXISTS idx_alertrecord_createtime ON alertrecord(createtime DESC)", "创建报警时间索引")) return false;
 
     // 2.1 carrier_wheel_status (各载具、轮号最新的综合遥测状态高速常驻表，最大 50x16=800 行)
@@ -472,11 +505,12 @@ bool DBSchema::ensureAllTables(QSqlDatabase &db){
                    OR (datetime(createtime)=datetime(NEW.createtime) AND rowid>NEW.rowid))
         )
         BEGIN
-            INSERT INTO alertrecord(createtime,carrier_id,camera_id,wheel_id,result,distance,dist_norm,lower_tolerance,imagename)
-            VALUES(NEW.createtime,NEW.carrier_id,NEW.camera_id,NEW.wheel_id,0,NEW.distance,NEW.dist_norm,NEW.lower_tolerance,NEW.imagename)
+            INSERT INTO alertrecord(createtime,carrier_id,camera_id,wheel_id,result,distance,dist_norm,lower_tolerance,imagename,min_value,max_value,deviation)
+            VALUES(NEW.createtime,NEW.carrier_id,NEW.camera_id,NEW.wheel_id,0,NEW.distance,NEW.dist_norm,NEW.lower_tolerance,NEW.imagename,NEW.min_value,NEW.max_value,NEW.deviation)
             ON CONFLICT(carrier_id,wheel_id) DO UPDATE SET
                 createtime=excluded.createtime,result=0,camera_id=excluded.camera_id,imagename=excluded.imagename,
-                distance=excluded.distance,dist_norm=excluded.dist_norm,lower_tolerance=excluded.lower_tolerance
+                distance=excluded.distance,dist_norm=excluded.dist_norm,lower_tolerance=excluded.lower_tolerance,
+                min_value=excluded.min_value,max_value=excluded.max_value,deviation=excluded.deviation
             WHERE datetime(excluded.createtime)>=datetime(alertrecord.createtime);
         END
     )")) return false;

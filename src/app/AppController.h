@@ -166,6 +166,12 @@ public:
     // startDate ~ endDate 含两端，最多 AppLogger::kMaxLogQueryDays 天；category 为 "all" 或 "alertDisposition"
     Q_INVOKABLE int requestLogs(const QString &startDate, const QString &endDate, const QString &level,
                                 const QString &keyword, int page, int pageSize, const QString &category = QString());
+    // 按当前日志查询条件导出全部匹配记录（不只是当前页）；format 为 "csv" 或 "xlsx"，
+    // 在后台线程写文件，完成后发出 logExportFinished
+    Q_INVOKABLE int exportLogs(const QString &startDate, const QString &endDate, const QString &level,
+                               const QString &keyword, const QString &category, const QString &format,
+                               const QString &target);
+    Q_INVOKABLE QString logExportFolderUrl() const;
     Q_INVOKABLE void openLogDirectory();
     Q_INVOKABLE void copyToClipboard(const QString &text);
 
@@ -215,6 +221,7 @@ signals:
     // 新的检测记录入库，或已入库记录关联到了图片
     void recordImagesChanged();
     void imageSaveFinished(int requestId, bool ok, const QString &message, const QString &targetPath);
+    void logExportFinished(int requestId, bool ok, const QString &message, const QString &targetPath);
 
 private:
     void startLogQuery();
@@ -292,6 +299,8 @@ private:
     QThreadPool m_exportPool;
     int m_imageSaveSeq = 0;
     QString m_lastImageSaveDir;
+    int m_logExportSeq = 0;
+    QString m_lastLogExportDir;
     bool m_cleanupRunning = false;
     QTimer m_storageTimer;
     StorageMonitor::Level m_storageLevel = StorageMonitor::Level::Ok;

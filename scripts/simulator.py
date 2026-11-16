@@ -103,13 +103,24 @@ class Simulator:
         kind = self.rng.choice(["bad_json", "future_ts", "path_name", "truncated", "idle_conn", "versioned"]) if fault else "normal"
         self.stats.add("batch." + kind)
 
-        images = {cam: f"SIM_{carrier}_{stamp}_{index}_cam{cam:02d}.png" for cam in range(1, 13)}
+        images = {}
         wheels = []
         for wheel in range(1, 17):
             cam = (wheel - 1) * 12 // 16 + 1
             ok = self.rng.random() > 0.03
-            wheels.append({"wheelId": wheel, "cameraId": cam, "actualDistance": round(120 + self.rng.uniform(-3, 3), 2),
-                           "baseDistance": 120.0, "lowerTolerance": -2.0, "result": "OK" if ok else "NG",
+            # 视觉端新报文：最小 / 最大实测、基准与偏差（偏差 = 最大 - 基准，由视觉端计算）
+            base = 155.0 if wheel >= 9 else 120.0
+            low = round(base + self.rng.uniform(-40, -1), 3)
+            high = round(max(low, base + self.rng.uniform(-6, 3)), 3)
+            deviation = round(high - base, 3)
+            if cam not in images:
+                name = f"SIM_{carrier}_{stamp}_{index}_cam{cam:02d}"
+                if wheel >= 9:
+                    # 驱动轮图片名追加 最小值_最大值_基准_偏差_结果，含小数点与负号
+                    name += f"_{low:.1f}_{high:.1f}_{base:.1f}_{deviation:.1f}_{'OK' if ok else 'NG'}"
+                images[cam] = name + ".png"
+            wheels.append({"wheelId": wheel, "cameraId": cam, "minValue": low, "maxValue": high,
+                           "baseValue": base, "deviation": deviation, "result": "OK" if ok else "NG",
                            "imageName": images[cam]})
         message = {"requestId": f"sim-{os.getpid()}-{index}", "carrierId": carrier, "timestamp": stamp, "wheels": wheels}
         expect_tcp_ok = True

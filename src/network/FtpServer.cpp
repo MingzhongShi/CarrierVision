@@ -1,6 +1,7 @@
 #include "network/FtpServer.h"
 #include <QDate>
 #include "common/AppLogger.h"
+#include "common/AgcUtils.h"
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QFileInfo>
@@ -793,6 +794,12 @@ void FtpControlConnection::processCommand(const QString &cmdLine)
             .arg(arg)
             .arg(path));
         if (path.isEmpty()) { sendReply(550, "Invalid path."); return; }
+        if (const QString name = QFileInfo(path).fileName(); name.size() > AgcUtils::kMaxImageNameLength) {
+            reportWarning(QStringLiteral("文件名过长（%1 字符，上限 %2），拒绝上传: %3")
+                              .arg(name.size()).arg(AgcUtils::kMaxImageNameLength).arg(name.left(128)));
+            sendReply(553, "File name too long.");
+            return;
+        }
         if (dateSubdirectories) {
             // 直接传到根目录的图片按接收日期分子目录落盘（images/yyyy-MM-dd/）。数十万张图放在同一目录时，
             // NTFS 新建文件明显变慢（同前缀长文件名的 8.3 短名生成），资源管理器也难以打开。

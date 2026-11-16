@@ -18,6 +18,15 @@ Item {
     property int totalCount: 0
     property bool shouldSelectFirst: false
     property int searchModelEpoch: 0
+    // 最小实测 / 最大实测 / 基准距离 / 偏差值 四列等宽
+    readonly property int measureColumnWidth: 54
+
+    // 测量值保留两位小数；旧记录没有的值（如偏差值）显示占位符
+    function formatMeasure(value) {
+        if (value === undefined || value === null || isNaN(value))
+            return "—";
+        return Number(value).toFixed(2);
+    }
 
     function requestPage(resetToFirst) {
         if (resetToFirst)
@@ -255,39 +264,25 @@ Item {
                                 }
                                 Text {
                                     text: "轮位 / 轮名称"
-                                    Layout.preferredWidth: 136
+                                    Layout.preferredWidth: 112
                                     horizontalAlignment: Text.AlignHCenter
                                     color: Theme.textSoft
                                     font.family: Theme.fontSans
                                     font.pixelSize: Theme.fontCaption
                                     font.weight: Theme.fontMedium
                                 }
-                                Text {
-                                    text: "实测间距"
-                                    Layout.preferredWidth: 60
-                                    horizontalAlignment: Text.AlignHCenter
-                                    color: Theme.textSoft
-                                    font.family: Theme.fontSans
-                                    font.pixelSize: Theme.fontCaption
-                                    font.weight: Theme.fontMedium
-                                }
-                                Text {
-                                    text: "基准距离"
-                                    Layout.preferredWidth: 60
-                                    horizontalAlignment: Text.AlignHCenter
-                                    color: Theme.textSoft
-                                    font.family: Theme.fontSans
-                                    font.pixelSize: Theme.fontCaption
-                                    font.weight: Theme.fontMedium
-                                }
-                                Text {
-                                    text: "下偏差"
-                                    Layout.preferredWidth: 54
-                                    horizontalAlignment: Text.AlignHCenter
-                                    color: Theme.textSoft
-                                    font.family: Theme.fontSans
-                                    font.pixelSize: Theme.fontCaption
-                                    font.weight: Theme.fontMedium
+                                Repeater {
+                                    model: ["最小实测", "最大实测", "基准距离", "偏差值"]
+                                    delegate: Text {
+                                        required property string modelData
+                                        text: modelData
+                                        Layout.preferredWidth: root.measureColumnWidth
+                                        horizontalAlignment: Text.AlignHCenter
+                                        color: Theme.textSoft
+                                        font.family: Theme.fontSans
+                                        font.pixelSize: Theme.fontCaption
+                                        font.weight: Theme.fontMedium
+                                    }
                                 }
                                 Text {
                                     text: "判定"
@@ -348,6 +343,7 @@ Item {
                                         Layout.fillWidth: true
                                         spacing: 2
                                         Text {
+                                            id: fileNameText
                                             text: fileName
                                             color: itemRect.isCurrent ? Theme.accent : Theme.text
                                             font.family: Theme.fontMono
@@ -355,6 +351,10 @@ Item {
                                             font.weight: Theme.fontMedium
                                             elide: Text.ElideMiddle
                                             Layout.fillWidth: true
+                                            // 驱动轮文件名带测量值，较长时中间省略，悬停显示完整文件名
+                                            ToolTip.visible: mouseArea.containsMouse && truncated
+                                            ToolTip.delay: 500
+                                            ToolTip.text: fileName
                                         }
                                         Text {
                                             text: receivedAtText
@@ -374,33 +374,42 @@ Item {
                                     }
                                     Text {
                                         text: appController.wheelLabel(wheelId)
-                                        Layout.preferredWidth: 136
+                                        Layout.preferredWidth: 112
                                         horizontalAlignment: Text.AlignHCenter
+                                        elide: Text.ElideRight
                                         color: Theme.text
                                         font.family: Theme.fontSans; font.features: Theme.fontFeaturesTabular
                                         font.pixelSize: Theme.fontBody
                                     }
                                     Text {
-                                        text: (distance !== undefined ? Number(distance).toFixed(2) : "0.00")
-                                        Layout.preferredWidth: 60
+                                        text: root.formatMeasure(minValue)
+                                        Layout.preferredWidth: root.measureColumnWidth
                                         horizontalAlignment: Text.AlignHCenter
                                         color: Theme.textSoft
                                         font.family: Theme.fontSans; font.features: Theme.fontFeaturesTabular
                                         font.pixelSize: Theme.fontCaption
                                     }
                                     Text {
-                                        text: (dist_norm !== undefined ? Number(dist_norm).toFixed(2) : "0.00")
-                                        Layout.preferredWidth: 60
+                                        text: root.formatMeasure(maxValue)
+                                        Layout.preferredWidth: root.measureColumnWidth
+                                        horizontalAlignment: Text.AlignHCenter
+                                        color: Theme.textSoft
+                                        font.family: Theme.fontSans; font.features: Theme.fontFeaturesTabular
+                                        font.pixelSize: Theme.fontCaption
+                                    }
+                                    Text {
+                                        text: root.formatMeasure(baseValue)
+                                        Layout.preferredWidth: root.measureColumnWidth
                                         horizontalAlignment: Text.AlignHCenter
                                         color: Theme.muted
                                         font.family: Theme.fontSans; font.features: Theme.fontFeaturesTabular
                                         font.pixelSize: Theme.fontCaption
                                     }
                                     Text {
-                                        text: (model && model.lowerTolerance !== undefined ? Number(model.lowerTolerance).toFixed(2) : "0.00")
-                                        Layout.preferredWidth: 54
+                                        text: root.formatMeasure(deviation)
+                                        Layout.preferredWidth: root.measureColumnWidth
                                         horizontalAlignment: Text.AlignHCenter
-                                        color: Theme.muted
+                                        color: Theme.textSoft
                                         font.family: Theme.fontSans; font.features: Theme.fontFeaturesTabular
                                         font.pixelSize: Theme.fontCaption
                                     }
@@ -589,6 +598,16 @@ Item {
                                         previewCard.adjustZoom((1.0 / previewCard.fitScale) / previewCard.userZoom, flick.width / 2, flick.height / 2);
                                 }
                             }
+
+                            IconButton {
+                                objectName: "queryPreviewSaveAsButton"
+                                visible: previewCard.hasImage
+                                iconName: "icon_save"
+                                text: previewSaver.busy ? "保存中" : "另存为"
+                                enabled: previewSaver.canSave && previewCard.hasImage
+                                toolTipText: "把原图保存到本地"
+                                onClicked: previewSaver.open()
+                            }
                         }
 
                         // 图像容器视窗
@@ -691,6 +710,13 @@ Item {
                                         font.pixelSize: Theme.fontCaption
                                     }
                                 }
+                            }
+
+                            // 另存为：结果提示显示在预览区内
+                            ImageSaveAs {
+                                id: previewSaver
+                                anchors.fill: parent
+                                sourceUrl: previewCard.selectedFileUrl
                             }
                         }
 
