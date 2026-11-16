@@ -45,13 +45,17 @@ QVariantMap alertOperation(const QSqlDatabase &db, const QString &kind,
 // "OK"/"1" -> 1，"NG"/"0" -> 0；其余返回 false
 bool parseResultFilter(const QString &text, int &result);
 
-// 在原路径、归档目录、源目录及程序目录附近查找图片；只返回已确认存在的绝对路径，找不到返回空串
+// 在图像目录、源目录及程序目录下的 images / archive 中按图片名查找；只返回已确认存在的绝对路径，找不到返回空串
 QString resolveImagePath(const QString &rawName, const QString &archiveDir, const QString &sourceDir);
-// 优先使用记录中的实际落盘路径 image_path（存在时），否则按图片名查找；
-// 给出记录时间 createTime 时，还会在归档目录下该日期前后一天的 yyyy-MM-dd 子目录中查找
+// 依次查找：记录中的实际落盘路径 image_path、归档目录下记录日期（及前后一天）的 yyyy-MM-dd 子目录、
+// 各图像根目录。不存在的目录 60 秒内只确认一次；找不到的图片 2 分钟内不重复查找（查找条件变化时除外）。
 QString resolveRecordImage(const QString &imagePath, const QString &imageName,
                            const QString &archiveDir, const QString &sourceDir,
                            const QString &createTime = QString());
+// FTP 存入新图片后调用：作废该文件名的"未找到"缓存，并标记其所在目录存在
+void noteImageStored(const QString &filePath);
+// 清空图片查找缓存（更换图像目录或测试时使用）
+void clearImageLookupCache();
 
 // 某架号某轮位最新一条检测记录及其图像：filePath（找不到落盘文件时为图片名）、fileName、time、result；
 // 无记录或参数越界时返回空 map。会访问磁盘确认图片位置，只应在后台线程调用。

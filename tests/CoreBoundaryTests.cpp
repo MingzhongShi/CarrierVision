@@ -651,6 +651,47 @@ private slots:
         QVERIFY(SearchService::resolveRecordImage(QString(), QStringLiteral("late.png"), archive.path(), QString()).isEmpty());
     }
 
+    void missingImageCachedUntilFtpStoresIt()
+    {
+        // 找不到的图片短时间内不重复查找；FTP 收到同名图片后立即可见
+        SearchService::clearImageLookupCache();
+        QTemporaryDir archive;
+        QVERIFY(archive.isValid());
+        const QString time = QStringLiteral("2026-09-12 08:00:00");
+        QVERIFY(SearchService::resolveRecordImage(QString(), QStringLiteral("later.png"), archive.path(), QString(), time).isEmpty());
+
+        QVERIFY(QDir().mkpath(archive.filePath(QStringLiteral("2026-09-12"))));
+        const QString path = archive.filePath(QStringLiteral("2026-09-12/later.png"));
+        QFile image(path);
+        QVERIFY(image.open(QIODevice::WriteOnly));
+        image.write("x");
+        image.close();
+        QVERIFY(SearchService::resolveRecordImage(QString(), QStringLiteral("later.png"), archive.path(), QString(), time).isEmpty());
+
+        SearchService::noteImageStored(path);
+        QVERIFY(SearchService::resolveRecordImage(QString(), QStringLiteral("LATER.png"), archive.path(), QString(), time)
+                    .endsWith(QStringLiteral("2026-09-12/later.png")));
+        SearchService::clearImageLookupCache();
+    }
+
+    void storedPathInMovedDirectoryFallsBackToImageDirectory()
+    {
+        // 历史图片目录被移走：记录中的旧绝对路径失效，按图片名在当前图像目录找到
+        SearchService::clearImageLookupCache();
+        QTemporaryDir archive;
+        QVERIFY(archive.isValid());
+        QFile image(archive.filePath(QStringLiteral("moved.png")));
+        QVERIFY(image.open(QIODevice::WriteOnly));
+        image.write("x");
+        image.close();
+        const QString stale = archive.filePath(QStringLiteral("old-root/2026-09-12/moved.png"));
+        QVERIFY(QFileInfo(stale).isAbsolute());
+        QCOMPARE(SearchService::resolveRecordImage(stale, QStringLiteral("moved.png"), archive.path(), QString(),
+                                                   QStringLiteral("2026-09-12 08:00:00")),
+                 QFileInfo(image.fileName()).absoluteFilePath());
+        SearchService::clearImageLookupCache();
+    }
+
     void alertHandlersRoundTripAndNormalize()
     {
         const QString connectionName = QStringLiteral("TestAlertHandlersDb");

@@ -298,9 +298,15 @@ AppController::AppController(QObject *parent)
     // FTP 日志已并入主日志，旧版本留在程序目录的 ftp.log 移入 logs/ 按日志保留天数清理
     migrateLegacyFtpLogs();
 
+    // 告警可能成批出现（任意线程）：最多每 500 ms 通知界面一次，界面读取的始终是最新一条
+    m_warnNotifyTimer.setSingleShot(true);
+    m_warnNotifyTimer.setInterval(500);
+    connect(&m_warnNotifyTimer, &QTimer::timeout, this, &AppController::latestWarnOrErrorChanged);
     AppLogger::setLogCallback([this](const QString &/*level*/, const QString &/*message*/, const QString &/*time*/) {
+        if (m_warnNotifyPending.exchange(true)) return;
         QMetaObject::invokeMethod(this, [this]() {
-            emit latestWarnOrErrorChanged();
+            m_warnNotifyPending = false;
+            if (!m_warnNotifyTimer.isActive()) m_warnNotifyTimer.start();
         }, Qt::QueuedConnection);
     });
 
