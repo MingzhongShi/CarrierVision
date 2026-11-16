@@ -692,6 +692,53 @@ private slots:
         SearchService::clearImageLookupCache();
     }
 
+    void wheelCountsFollowInsertsDeletesAndMigration()
+    {
+        // 计数表随插入、删除维护；旧库（没有计数表）升级时按现有记录补全
+        const QString connectionName = QStringLiteral("TestWheelCountsDb");
+        {
+            QSqlDatabase db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connectionName);
+            db.setDatabaseName(QStringLiteral(":memory:"));
+            QVERIFY(db.open());
+            QVERIFY(DBSchema::ensureAllTables(db));
+            QSqlQuery q(db);
+            QVERIFY(q.exec("INSERT INTO record(createtime,carrier_id,camera_id,wheel_id,result,imagename) VALUES"
+                           "('2026-09-04 10:00:00',7,1,1,1,'a.png'),('2026-09-04 10:01:00',7,1,1,0,'b.png'),"
+                           "('2026-09-04 10:02:00',7,1,9,0,'c.png'),('2026-09-04 10:03:00',8,1,1,1,'d.png')"));
+            auto counts = [&](int rack, int wheel) {
+                QSqlQuery c(db);
+                c.prepare("SELECT total, ng FROM carrier_wheel_counts WHERE carrier_id=:r AND wheel_id=:w");
+                c.bindValue(":r", rack); c.bindValue(":w", wheel);
+                if (!c.exec() || !c.next()) return QPair<int, int>(-1, -1);
+                return QPair<int, int>(c.value(0).toInt(), c.value(1).toInt());
+            };
+            QCOMPARE(counts(7, 1), qMakePair(2, 1));
+            QCOMPARE(counts(7, 9), qMakePair(1, 1));
+            QCOMPARE(StatsService::rackPhotoCounts(db).at(6).toMap().value("count").toInt(), 2);
+            QCOMPARE(StatsService::homepageCurrentDetection(db, 7).value("totalCount").toInt(), 3);
+            QCOMPARE(StatsService::homepageCurrentDetection(db, 7).value("ngCount").toInt(), 2);
+
+            QVERIFY(q.exec("DELETE FROM record WHERE imagename='b.png'"));
+            QCOMPARE(counts(7, 1), qMakePair(1, 0));
+
+            // 模拟升级前的库：没有计数表时重新初始化，按现有记录补全
+            QVERIFY(q.exec("DROP TABLE carrier_wheel_counts"));
+            QVERIFY(q.exec("DROP TRIGGER trg_record_counts_insert"));
+            QVERIFY(q.exec("DROP TRIGGER trg_record_counts_delete"));
+            QVERIFY(q.exec("DROP TRIGGER trg_record_counts_update"));
+            QVERIFY(q.exec("INSERT INTO record(createtime,carrier_id,camera_id,wheel_id,result,imagename) VALUES"
+                           "('2026-09-04 10:04:00',7,1,1,0,'e.png')"));
+            QVERIFY(DBSchema::ensureAllTables(db));
+            QCOMPARE(counts(7, 1), qMakePair(2, 1));
+            QCOMPARE(counts(8, 1), qMakePair(1, 0));
+            QVERIFY(q.exec("INSERT INTO record(createtime,carrier_id,camera_id,wheel_id,result,imagename) VALUES"
+                           "('2026-09-04 10:05:00',7,1,1,1,'f.png')"));
+            QCOMPARE(counts(7, 1), qMakePair(3, 1));
+            db.close();
+        }
+        QSqlDatabase::removeDatabase(connectionName);
+    }
+
     void alertHandlersRoundTripAndNormalize()
     {
         const QString connectionName = QStringLiteral("TestAlertHandlersDb");

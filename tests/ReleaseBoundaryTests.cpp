@@ -443,15 +443,23 @@ private slots:
         QVERIFY(makeOld("pending.png"));
         QFile marker(dir.filePath("pending.png.cv-pending")); QVERIFY(marker.open(QIODevice::WriteOnly)); marker.close();
         QVERIFY(makeImage(dir.filePath("fresh.png")));
+        // 未超期日期的子目录整个跳过（即使其中文件的修改时间被改旧），超期日期的子目录照常清理
+        const QString recentDay = QDate::currentDate().toString("yyyy-MM-dd");
+        const QString oldDay = QDate::currentDate().addDays(-200).toString("yyyy-MM-dd");
+        QVERIFY(QDir().mkpath(dir.filePath(recentDay))); QVERIFY(QDir().mkpath(dir.filePath(oldDay)));
+        QVERIFY(makeOld(recentDay + "/skipped.png"));
+        QVERIFY(makeOld(oldDay + "/dated_orphan.png"));
         QSqlQuery q(db);
         QVERIFY(q.exec("INSERT INTO record(createtime,carrier_id,camera_id,wheel_id,result,imagename) VALUES('2026-01-01 00:00:00',1,1,1,1,'by_name.png')"));
         q.prepare("INSERT INTO record(createtime,carrier_id,camera_id,wheel_id,result,imagename,image_path) VALUES('2026-01-01 00:00:00',1,1,2,1,'other.png',:p)");
         q.bindValue(":p", QFileInfo(dir.filePath("by_path.png")).canonicalFilePath()); QVERIFY(q.exec());
         QString error;
         const int deleted = ArchiveMaintenance::sweepOrphans(db, {dir.path(), dir.path()}, QDateTime::currentDateTime().addDays(-97), 100, error);
-        QCOMPARE(deleted, 2);
+        QCOMPARE(deleted, 3);
         QVERIFY(!QFile::exists(dir.filePath("orphan.png")));
         QVERIFY(!QFile::exists(dir.filePath("sub/orphan_v2.png")));
+        QVERIFY(!QFile::exists(dir.filePath(oldDay + "/dated_orphan.png")));
+        QVERIFY(QFile::exists(dir.filePath(recentDay + "/skipped.png")));
         for (const char *kept : {"by_name.png", "by_path.png", "pending.png", "fresh.png"})
             QVERIFY2(QFile::exists(dir.filePath(kept)), kept);
         QVERIFY(QDir(dir.filePath("sub")).exists());
@@ -607,6 +615,35 @@ private slots:
         const auto tooLong = AppLogger::queryLogRange("2024-01-01", "2025-01-04", "all", "", 1, 10);
         QVERIFY(tooLong.contains("error"));
         QCOMPARE(tooLong["total"].toInt(), 0);
+    }
+    void logQueryCountsGrowingVolumeIncrementally() {
+        // 分卷计数有缓存：文件追加后只补扫新增部分；快照末尾正在写入的半行本次计入，补全后不重复计数
+        QTemporaryDir dir;
+        AppLogger::init(dir.path()); AppLogger::shutdown();
+        const QString path = dir.filePath("carrier_2025-02-01.log");
+        auto append = [&](const QByteArray &bytes) {
+            QFile file(path);
+            return file.open(QIODevice::Append) && file.write(bytes) == bytes.size();
+        };
+        QVERIFY(append("[2025-02-01 08:00:00.000] [info] one\n[2025-02-01 08:00:01.000] [warning] two\n"
+                       "[2025-02-01 08:00:02.000] [info] thr"));
+        auto result = AppLogger::queryLogRange("2025-02-01", "2025-02-01", "all", "", 1, 10);
+        QCOMPARE(result["total"].toInt(), 3);
+        QCOMPARE(AppLogger::queryLogRange("2025-02-01", "2025-02-01", "warn", "", 1, 10)["total"].toInt(), 1);
+        QVERIFY(append("ee\n[2025-02-01 08:00:03.000] [info] four\n"));
+        result = AppLogger::queryLogRange("2025-02-01", "2025-02-01", "all", "", 1, 2);
+        QCOMPARE(result["total"].toInt(), 4);
+        auto items = result["items"].toList();
+        QCOMPARE(items.size(), 2);
+        QCOMPARE(items[0].toMap()["message"].toString(), QString("four"));
+        QCOMPARE(items[1].toMap()["message"].toString(), QString("three"));
+        result = AppLogger::queryLogRange("2025-02-01", "2025-02-01", "all", "", 2, 2);
+        items = result["items"].toList();
+        QCOMPARE(items.size(), 2);
+        QCOMPARE(items[0].toMap()["message"].toString(), QString("two"));
+        QCOMPARE(items[1].toMap()["message"].toString(), QString("one"));
+        QCOMPARE(AppLogger::queryLogRange("2025-02-01", "2025-02-01", "all", "THREE", 1, 10)["total"].toInt(), 1);
+        QCOMPARE(AppLogger::queryLogRange("2025-02-01", "2025-02-01", "warn", "", 1, 10)["total"].toInt(), 1);
     }
     void logQueryReadsFileStillOpenForWriting() {
         // 日志文件由写入方一直打开；查询必须按打开句柄的实际长度读取，不能依赖目录项里的大小

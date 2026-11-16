@@ -26,17 +26,19 @@ class PendingImageCache
 public:
     static constexpr int kMaxEntries = 512;
     static constexpr int kMaxAgeSecs = 5 * 60;
+    static constexpr int kFileCheckSecs = 60;
 
     // imageName 为客户端请求的文件名（匹配键），filePath 为实际落盘路径
     void add(const QString &imageName, const QString &filePath, const QDateTime &receivedAt);
     // 按图像名查找仍存在的缓存文件路径，找不到返回空串
     QString find(const QString &imageName) const;
     void remove(const QString &imageName);
-    // 丢弃超时或已被删除的文件，并将数量限制在 kMaxEntries
+    // 丢弃超时的文件（已被删除的文件最多每 kFileCheckSecs 秒确认一次），并将数量限制在 kMaxEntries
     void prune(const QDateTime &now);
     int size() const { return m_entries.size(); }
 
 private:
+    QDateTime m_lastFileCheck;
     struct Entry {
         QString filePath;
         QDateTime receivedAt;

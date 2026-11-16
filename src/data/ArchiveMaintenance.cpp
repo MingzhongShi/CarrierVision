@@ -3,6 +3,7 @@
 #include "common/AppLogger.h"
 #include <QDir>
 #include <QDirIterator>
+#include <QRegularExpression>
 #include <QFileInfo>
 #include <QFile>
 #include <QSet>
@@ -309,28 +310,46 @@ int ArchiveMaintenance::sweepOrphans(QSqlDatabase db, const QStringList &managed
         if (!nested) topRoots << root;
     }
 
+    // FTP 按接收日期把图片存进 yyyy-MM-dd 子目录：晚于 olderThan 当天的日期目录里不可能有超期文件，
+    // 整个跳过，每天只需遍历超期日期的目录和旧版平铺存放的文件，而不是整个图像目录
+    const QDate newestScannedDay = olderThan.date();
+    static const QRegularExpression dayDir(QStringLiteral("^\\d{4}-\\d{2}-\\d{2}$"));
     int deleted = 0;
     for (const QString &root : std::as_const(topRoots)) {
-        QDirIterator it(root, QDir::Files | QDir::NoDotAndDotDot | QDir::NoSymLinks, QDirIterator::Subdirectories);
-        while (it.hasNext() && deleted < maxFiles) {
-            const QString path = QDir::cleanPath(it.next());
-            const QFileInfo info = it.fileInfo();
-            if (info.fileName().startsWith('.') || !AgcUtils::isImageFile(path)) continue;
-            if (info.lastModified() >= olderThan || QFileInfo::exists(path + ".cv-pending")) continue;
-            if (!safeFile(path, {root})) continue;
-            // 按实际路径或文件名任一被引用都保留（文件名匹配比清理更保守，覆盖未关联路径的历史记录）
-            QSqlQuery refs(db);
-            refs.prepare("SELECT 1 FROM record WHERE image_path=:path UNION ALL "
-                         "SELECT 1 FROM record WHERE imagename=:name LIMIT 1");
-            refs.bindValue(":path", path);
-            refs.bindValue(":name", info.fileName());
-            if (!refs.exec()) { error = refs.lastError().text(); return deleted; }
-            const bool used = refs.next();
-            refs.finish();
-            if (used) continue;
-            if (QFile::remove(path)) {
-                ++deleted;
-                LOG_INFO("[CLEANUP] 删除超期未被引用的孤儿图片: {}", path.toStdString());
+        QStringList pendingDirs{root};
+        while (!pendingDirs.isEmpty() && deleted < maxFiles) {
+            const QString current = pendingDirs.takeLast();
+            QDirIterator dirs(current, QDir::Dirs | QDir::NoDotAndDotDot | QDir::NoSymLinks);
+            while (dirs.hasNext()) {
+                const QString sub = dirs.next();
+                const QString name = dirs.fileName();
+                if (dayDir.match(name).hasMatch()) {
+                    const QDate day = QDate::fromString(name, QStringLiteral("yyyy-MM-dd"));
+                    if (day.isValid() && day > newestScannedDay) continue;
+                }
+                pendingDirs << sub;
+            }
+            QDirIterator it(current, QDir::Files | QDir::NoDotAndDotDot | QDir::NoSymLinks);
+            while (it.hasNext() && deleted < maxFiles) {
+                const QString path = QDir::cleanPath(it.next());
+                const QFileInfo info = it.fileInfo();
+                if (info.fileName().startsWith('.') || !AgcUtils::isImageFile(path)) continue;
+                if (info.lastModified() >= olderThan || QFileInfo::exists(path + ".cv-pending")) continue;
+                if (!safeFile(path, {root})) continue;
+                // 按实际路径或文件名任一被引用都保留（文件名匹配比清理更保守，覆盖未关联路径的历史记录）
+                QSqlQuery refs(db);
+                refs.prepare("SELECT 1 FROM record WHERE image_path=:path UNION ALL "
+                             "SELECT 1 FROM record WHERE imagename=:name LIMIT 1");
+                refs.bindValue(":path", path);
+                refs.bindValue(":name", info.fileName());
+                if (!refs.exec()) { error = refs.lastError().text(); return deleted; }
+                const bool used = refs.next();
+                refs.finish();
+                if (used) continue;
+                if (QFile::remove(path)) {
+                    ++deleted;
+                    LOG_INFO("[CLEANUP] 删除超期未被引用的孤儿图片: {}", path.toStdString());
+                }
             }
         }
     }

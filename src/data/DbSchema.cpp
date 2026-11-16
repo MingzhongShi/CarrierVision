@@ -494,6 +494,68 @@ bool DBSchema::ensureAllTables(QSqlDatabase &db){
         }
     }
 
+    // 2.2 carrier_wheel_counts：各载具、轮号保留期内的记录数与 NG 数（最多 50x16 行），由触发器随插入、删除维护。
+    // 监控页的各架拍照次数、首页本架累计检测数每来一批都要刷新，此前每次都对保留期内全部记录做 COUNT，
+    // 耗时随保留量线性增长。旧库首次启动时按现有记录一次性补全（只读覆盖索引）。
+    {
+        bool fresh = true;
+        QSqlQuery exists(db);
+        if (exists.exec(QStringLiteral("SELECT 1 FROM sqlite_master WHERE type='table' AND name='carrier_wheel_counts'"))
+            && exists.next())
+            fresh = false;
+        exists.finish();
+        if (fresh) {
+            QElapsedTimer timer;
+            timer.start();
+            if (!q.exec(QStringLiteral("BEGIN IMMEDIATE"))) {
+                LOG_ERROR("DBSchema: 创建记录计数表失败: {}", q.lastError().text().toStdString());
+                return false;
+            }
+            const bool ok = q.exec(QStringLiteral("DROP TRIGGER IF EXISTS trg_record_counts_insert"))
+                && q.exec(QStringLiteral("DROP TRIGGER IF EXISTS trg_record_counts_delete"))
+                && q.exec(QStringLiteral("DROP TRIGGER IF EXISTS trg_record_counts_update"))
+                && q.exec(QStringLiteral(
+                    "CREATE TABLE carrier_wheel_counts ("
+                    " carrier_id INTEGER NOT NULL, wheel_id INTEGER NOT NULL,"
+                    " total INTEGER NOT NULL DEFAULT 0, ng INTEGER NOT NULL DEFAULT 0,"
+                    " PRIMARY KEY(carrier_id, wheel_id)) WITHOUT ROWID"))
+                && q.exec(QStringLiteral(
+                    "INSERT INTO carrier_wheel_counts(carrier_id, wheel_id, total, ng) "
+                    "SELECT carrier_id, wheel_id, COUNT(*), SUM(CASE WHEN result = 0 THEN 1 ELSE 0 END) "
+                    "FROM record GROUP BY carrier_id, wheel_id"))
+                && q.exec(QStringLiteral(
+                    "CREATE TRIGGER trg_record_counts_insert AFTER INSERT ON record BEGIN "
+                    " INSERT INTO carrier_wheel_counts(carrier_id, wheel_id, total, ng) "
+                    " VALUES(NEW.carrier_id, NEW.wheel_id, 1, CASE WHEN NEW.result = 0 THEN 1 ELSE 0 END) "
+                    " ON CONFLICT(carrier_id, wheel_id) DO UPDATE SET total = total + 1, ng = ng + excluded.ng; "
+                    "END"))
+                && q.exec(QStringLiteral(
+                    "CREATE TRIGGER trg_record_counts_delete AFTER DELETE ON record BEGIN "
+                    " UPDATE carrier_wheel_counts SET total = total - 1, ng = ng - (CASE WHEN OLD.result = 0 THEN 1 ELSE 0 END) "
+                    " WHERE carrier_id = OLD.carrier_id AND wheel_id = OLD.wheel_id; "
+                    "END"))
+                && q.exec(QStringLiteral(
+                    "CREATE TRIGGER trg_record_counts_update AFTER UPDATE OF carrier_id, wheel_id, result ON record BEGIN "
+                    " UPDATE carrier_wheel_counts SET total = total - 1, ng = ng - (CASE WHEN OLD.result = 0 THEN 1 ELSE 0 END) "
+                    " WHERE carrier_id = OLD.carrier_id AND wheel_id = OLD.wheel_id; "
+                    " INSERT INTO carrier_wheel_counts(carrier_id, wheel_id, total, ng) "
+                    " VALUES(NEW.carrier_id, NEW.wheel_id, 1, CASE WHEN NEW.result = 0 THEN 1 ELSE 0 END) "
+                    " ON CONFLICT(carrier_id, wheel_id) DO UPDATE SET total = total + 1, ng = ng + excluded.ng; "
+                    "END"));
+            if (!ok) {
+                LOG_ERROR("DBSchema: 创建记录计数表失败: {}", q.lastError().text().toStdString());
+                q.exec(QStringLiteral("ROLLBACK"));
+                return false;
+            }
+            if (!q.exec(QStringLiteral("COMMIT"))) {
+                LOG_ERROR("DBSchema: 提交记录计数表失败: {}", q.lastError().text().toStdString());
+                q.exec(QStringLiteral("ROLLBACK"));
+                return false;
+            }
+            LOG_INFO("DBSchema: 已建立载具轮号记录计数表，耗时 {} ms", timer.elapsed());
+        }
+    }
+
     if (!q.exec("DROP TRIGGER IF EXISTS trg_record_ng_alert")) return false;
     if (!q.exec("DROP TRIGGER IF EXISTS trg_record_ok_alert")) return false;
 

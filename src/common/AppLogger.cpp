@@ -5,6 +5,8 @@
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
+#include <QVector>
+#include <QMutex>
 #include <QFileInfo>
 #include <QFileInfoList>
 #include <QRegularExpression>
@@ -663,38 +665,103 @@ bool collectLogVolumes(const QString &logDir, const QString &startDate, const QS
     return true;
 }
 
+struct LogFilter {
+    QString level;
+    QString keyword;
+    bool alertDispositionOnly = false;
+};
+
+LogFilter makeFilter(const QString &level, const QString &keyword, const QString &category)
+{
+    // 报警处置日志统一以"报警处置"开头（完成 / 失败），历史日志同样适用
+    return {level.trimmed().toLower(), keyword.trimmed(), category.trimmed() == QLatin1String("alertDisposition")};
+}
+
+// 从 from 字节处起逐行扫描一个分卷，直到快照长度 volume.size；对通过过滤的行调用 visitor，visitor 返回 false 时停止。
+// completeEnd（可选）返回最后一个完整行（以换行结尾）之后的偏移、completeCount 返回其中通过过滤的行数，
+// 快照末尾正被写入的半行不计入，用于增量计数缓存。返回 false 表示 visitor 要求停止。
+bool scanVolume(const LogVolume &volume, qint64 from, const LogFilter &filter, const AppLogger::LogVisitor &visitor,
+                qint64 *completeEnd = nullptr, qint64 *completeCount = nullptr)
+{
+    static const QString alertDispositionPrefix = QStringLiteral("报警处置");
+    static const QRegularExpression lineRe(QStringLiteral("^\\[(\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}\\.\\d{3})\\] \\[(\\w+)\\] (.*)$"));
+    if (completeEnd) *completeEnd = from;
+    if (completeCount) *completeCount = 0;
+    QFile file(volume.path);
+    if (!file.open(QIODevice::ReadOnly) || (from > 0 && !file.seek(from))) return true;
+    qint64 matched = 0;
+    while (!file.atEnd() && file.pos() < volume.size) {
+        const QByteArray raw = file.readLine(qMin<qint64>(64*1024,volume.size-file.pos()+1));
+        if (raw.isEmpty()) break;
+        const bool complete = raw.endsWith('\n');
+        auto finishLine = [&](bool counted) {
+            if (counted) ++matched;
+            if (complete) {
+                if (completeEnd) *completeEnd = file.pos();
+                if (completeCount) *completeCount = matched;
+            }
+        };
+        const QString line = QString::fromUtf8(raw).trimmed();
+        if (line.isEmpty()) { finishLine(false); continue; }
+        const auto match = lineRe.match(line);
+        const QString time = match.hasMatch() ? match.captured(1) : QString();
+        const QString lvl = match.hasMatch() ? match.captured(2).toLower() : QStringLiteral("info");
+        const QString message = match.hasMatch() ? match.captured(3) : line;
+        bool pass = true;
+        if (!filter.level.isEmpty() && filter.level!="all") {
+            if (filter.level=="warn" || filter.level=="warning") pass = lvl=="warn" || lvl=="warning";
+            else if (filter.level=="error" || filter.level=="critical") pass = lvl=="error" || lvl=="critical";
+            else pass = lvl==filter.level;
+        }
+        if (pass && filter.alertDispositionOnly && !message.startsWith(alertDispositionPrefix)) pass = false;
+        if (pass && !filter.keyword.isEmpty() && !message.contains(filter.keyword,Qt::CaseInsensitive)
+            && !time.contains(filter.keyword,Qt::CaseInsensitive)) pass = false;
+        finishLine(pass);
+        if (pass && !visitor(time, lvl, message, line)) return false;
+    }
+    return true;
+}
+
 // 按时间正序逐行扫描分卷，对通过级别 / 类别 / 关键字过滤的行调用 visitor；visitor 返回 false 时停止
 void scanLogVolumes(const QList<LogVolume> &volumes, const QString &level, const QString &keyword,
                     const QString &category, const AppLogger::LogVisitor &visitor)
 {
-    const QString filterLevel = level.trimmed().toLower(), filterKeyword = keyword.trimmed();
-    // 报警处置日志统一以"报警处置"开头（完成 / 失败），历史日志同样适用
-    const bool alertDispositionOnly = category.trimmed() == QLatin1String("alertDisposition");
-    const QString alertDispositionPrefix = QStringLiteral("报警处置");
-    const QRegularExpression lineRe(QStringLiteral("^\\[(\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}\\.\\d{3})\\] \\[(\\w+)\\] (.*)$"));
+    const LogFilter filter = makeFilter(level, keyword, category);
     for (const auto &volume : volumes) {
-        QFile file(volume.path);
-        if (!file.open(QIODevice::ReadOnly)) continue;
-        while (!file.atEnd() && file.pos() < volume.size) {
-            const QByteArray raw = file.readLine(qMin<qint64>(64*1024,volume.size-file.pos()+1));
-            if (raw.isEmpty()) break;
-            const QString line = QString::fromUtf8(raw).trimmed();
-            if (line.isEmpty()) continue;
-            const auto match = lineRe.match(line);
-            const QString time = match.hasMatch() ? match.captured(1) : QString();
-            const QString lvl = match.hasMatch() ? match.captured(2).toLower() : QStringLiteral("info");
-            const QString message = match.hasMatch() ? match.captured(3) : line;
-            if (!filterLevel.isEmpty() && filterLevel!="all") {
-                if (filterLevel=="warn" || filterLevel=="warning") { if(lvl!="warn" && lvl!="warning") continue; }
-                else if(filterLevel=="error" || filterLevel=="critical") { if(lvl!="error" && lvl!="critical") continue; }
-                else if(lvl!=filterLevel) continue;
-            }
-            if (alertDispositionOnly && !message.startsWith(alertDispositionPrefix)) continue;
-            if (!filterKeyword.isEmpty() && !message.contains(filterKeyword,Qt::CaseInsensitive)
-                && !time.contains(filterKeyword,Qt::CaseInsensitive)) continue;
-            if (!visitor(time, lvl, message, line)) return;
-        }
+        if (!scanVolume(volume, 0, filter, visitor)) return;
     }
+}
+
+// 分卷匹配行数缓存：已写完的分卷不再变化，当天正在写入的分卷只扫描上次之后新增的部分。
+// 查询第 1 页（最新日志）时不必再把整个日期范围从头扫两遍。
+struct CountEntry { qint64 scannedTo = 0; qint64 count = 0; };
+QMutex s_countMutex;
+QHash<QString, CountEntry> s_countCache;
+constexpr int kMaxCountEntries = 4096;
+
+qint64 countVolume(const LogVolume &volume, const LogFilter &filter)
+{
+    const QString key = volume.path + u'\x1f' + filter.level + u'\x1f' + filter.keyword + u'\x1f'
+        + (filter.alertDispositionOnly ? u'1' : u'0');
+    CountEntry entry;
+    {
+        QMutexLocker locker(&s_countMutex);
+        entry = s_countCache.value(key);
+    }
+    if (entry.scannedTo > volume.size) entry = {}; // 文件被截短或替换，重新计数
+    qint64 completeEnd = entry.scannedTo, completeCount = 0;
+    qint64 scanned = 0; // 本次扫描到的匹配行（含快照末尾正在写入的半行，半行不进缓存）
+    scanVolume(volume, entry.scannedTo, filter, [&](const QString &, const QString &, const QString &, const QString &) {
+        ++scanned;
+        return true;
+    }, &completeEnd, &completeCount);
+    const qint64 total = entry.count + scanned;
+    entry.count += completeCount;
+    entry.scannedTo = completeEnd;
+    QMutexLocker locker(&s_countMutex);
+    if (s_countCache.size() >= kMaxCountEntries) s_countCache.clear();
+    s_countCache.insert(key, entry);
+    return total;
 }
 
 } // namespace
@@ -730,24 +797,36 @@ QVariantMap AppLogger::queryLogRange(const QString &startDate, const QString &en
     result["startDate"] = first.toString(Qt::ISODate);
     result["endDate"] = last.toString(Qt::ISODate);
 
-    // 两遍流式扫描：第一遍计数，第二遍只收集请求的一页，内存中只保留一页
+    // 先按分卷取匹配行数（有缓存），再只扫描请求页所在的分卷；第 1 页（最新）通常只读最后一个分卷。内存中只保留一页
+    const LogFilter filter = makeFilter(level, keyword, category);
+    QVector<qint64> counts;
+    counts.reserve(volumes.size());
     qint64 total = 0;
-    scanLogVolumes(volumes, level, keyword, category, [&total](const QString &, const QString &, const QString &, const QString &) {
-        ++total;
-        return true;
-    });
+    for (const auto &volume : std::as_const(volumes)) {
+        counts.append(countVolume(volume, filter));
+        total += counts.constLast();
+    }
     const qint64 offset = qint64(page-1)*pageSize;
     const qint64 lastIndex = qMax<qint64>(0,total-offset), firstIndex=qMax<qint64>(0,lastIndex-pageSize);
     QVariantList items;
     if (lastIndex > firstIndex) {
-        qint64 index = 0;
-        scanLogVolumes(volumes, level, keyword, category,
-                       [&](const QString &time, const QString &lvl, const QString &message, const QString &line) {
-            if (index >= firstIndex && index < lastIndex)
-                items.append(QVariantMap{{"time",time},{"level",lvl.toUpper()},{"message",message},{"raw",line}});
-            ++index;
-            return index < lastIndex;
-        });
+        qint64 base = 0;
+        for (int v = 0; v < volumes.size(); ++v) {
+            const qint64 volumeEnd = base + counts.at(v);
+            if (volumeEnd > firstIndex && base < lastIndex) {
+                qint64 index = base;
+                const bool more = scanVolume(volumes.at(v), 0, filter,
+                    [&](const QString &time, const QString &lvl, const QString &message, const QString &line) {
+                        if (index >= firstIndex && index < lastIndex)
+                            items.append(QVariantMap{{"time",time},{"level",lvl.toUpper()},{"message",message},{"raw",line}});
+                        ++index;
+                        return index < lastIndex;
+                    });
+                if (!more) break;
+            }
+            base = volumeEnd;
+            if (base >= lastIndex) break;
+        }
     }
     std::reverse(items.begin(),items.end());
     result["total"] = total;
