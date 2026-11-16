@@ -3,6 +3,7 @@
 #include <QSqlDatabase>
 #include <QString>
 #include <QStringList>
+#include <QVariantMap>
 
 // 数据库完整性检查、在线备份与损坏恢复。
 namespace DatabaseGuard {
@@ -25,5 +26,37 @@ QString recoverIfCorrupt(const QString &dbPath, const QString &backupDir);
 QString runningMarkerPath(const QString &dbPath);
 // 日常检查发现损坏时创建，下次启动强制检查并恢复
 QString corruptMarkerPath(const QString &dbPath);
+
+// ---- 空间回收与监控 ----
+
+struct SpaceInfo {
+    qint64 pageSize = 0;
+    qint64 pageCount = 0;
+    qint64 freePages = 0;
+    int autoVacuum = 0; // 0 关闭，1 完全，2 增量
+};
+bool spaceInfo(QSqlDatabase &db, SpaceInfo &info, QString &error);
+
+// 启动时、其他连接打开之前调用。新库设为增量回收（auto_vacuum=INCREMENTAL）；
+// 已有数据的旧库需要一次完整 VACUUM 才能切换，只在库文件不超过 maxConvertBytes 时执行（耗时与库大小成正比）。
+// detail 说明执行了什么（无动作时为空）。
+bool enableIncrementalVacuum(QSqlDatabase &db, qint64 maxConvertBytes, QString &detail);
+
+struct CompactResult {
+    bool checkpointed = false;   // WAL 已全部写回并截断
+    qint64 walBytesBefore = 0;
+    qint64 walBytesAfter = 0;
+    qint64 freePagesBefore = 0;
+    qint64 freePagesAfter = 0;
+    qint64 fileBytesBefore = 0;
+    qint64 fileBytesAfter = 0;
+};
+// 每日维护：wal_checkpoint(TRUNCATE) 把 WAL 写回主库并截断；增量回收模式下分步 incremental_vacuum
+// 释放空闲页（每步一个短写事务，步间让出写锁，不长时间阻塞入库）。
+bool compact(QSqlDatabase &db, const QString &dbPath, CompactResult &result, QString &error,
+             int pagesPerStep = 2048, int maxSteps = 512);
+
+// 数据库监控：文件/WAL 大小、页与空闲页、记录数与时间范围、CSV 归档大小
+QVariantMap databaseInfo(QSqlDatabase &db, const QString &dbPath, const QString &csvArchiveDir);
 
 } // namespace DatabaseGuard

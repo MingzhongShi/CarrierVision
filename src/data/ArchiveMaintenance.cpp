@@ -8,6 +8,8 @@
 #include <QSet>
 #include <QSqlQuery>
 #include <QSqlError>
+#include <QSqlRecord>
+#include <QHash>
 #include <QStandardPaths>
 #include <QCoreApplication>
 
@@ -50,11 +52,111 @@ bool referenced(QSqlDatabase &db, const QString &path, const QString &name, bool
     refs.finish();
     return found;
 }
+
+QString csvField(const QVariant &value)
+{
+    if (value.isNull()) return QString();
+    QString text = value.toString();
+    if (text.contains(u',') || text.contains(u'"') || text.contains(u'\n') || text.contains(u'\r')) {
+        text.replace(QStringLiteral("\""), QStringLiteral("\"\""));
+        text = u'"' + text + u'"';
+    }
+    return text;
+}
+
+// 待删除记录按月份追加到 CSV；删除事务提交前 flush，写入失败则回滚删除，保证不丢数据
+class RecordCsvArchive {
+public:
+    explicit RecordCsvArchive(const QString &dir) : m_dir(dir) {}
+    ~RecordCsvArchive() { qDeleteAll(m_files); }
+    RecordCsvArchive(const RecordCsvArchive &) = delete;
+    RecordCsvArchive &operator=(const RecordCsvArchive &) = delete;
+    bool enabled() const { return !m_dir.isEmpty(); }
+
+    bool append(QSqlDatabase &db, const QString &where, const QList<QPair<QString, QVariant>> &binds,
+                int &rows, QString &error)
+    {
+        QSqlQuery q(db);
+        if (!q.prepare(QStringLiteral("SELECT * FROM record WHERE ") + where + QStringLiteral(" ORDER BY createtime"))) {
+            error = q.lastError().text();
+            return false;
+        }
+        for (const auto &bind : binds) q.bindValue(bind.first, bind.second);
+        if (!q.exec()) { error = q.lastError().text(); return false; }
+        const QSqlRecord columns = q.record();
+        const int createIndex = columns.indexOf(QStringLiteral("createtime"));
+        QStringList names;
+        for (int i = 0; i < columns.count(); ++i) names << columns.fieldName(i);
+        const QString header = names.join(u',');
+        while (q.next()) {
+            QString month = q.value(createIndex).toString().left(7);
+            if (month.size() != 7 || month.at(4) != u'-') month = QStringLiteral("unknown");
+            QFile *file = fileFor(month, header, error);
+            if (!file) return false;
+            QStringList fields;
+            fields.reserve(columns.count());
+            for (int i = 0; i < columns.count(); ++i) fields << csvField(q.value(i));
+            const QByteArray line = (fields.join(u',') + QStringLiteral("\r\n")).toUtf8();
+            if (file->write(line) != line.size()) { error = file->errorString(); return false; }
+            ++rows;
+        }
+        return true;
+    }
+
+    bool flush(QString &error)
+    {
+        for (QFile *file : std::as_const(m_files)) {
+            if (!file->flush()) { error = file->errorString(); return false; }
+        }
+        return true;
+    }
+
+private:
+    QFile *fileFor(const QString &month, const QString &header, QString &error)
+    {
+        const QString key = month + u'|' + header;
+        if (QFile *open = m_files.value(key)) return open;
+        if (!QDir().mkpath(m_dir)) { error = QStringLiteral("无法创建归档目录 %1").arg(m_dir); return nullptr; }
+        const QString path = ArchiveMaintenance::archiveFileFor(m_dir, month, header);
+        auto *file = new QFile(path);
+        const bool fresh = !file->exists() || file->size() == 0;
+        if (!file->open(QIODevice::WriteOnly | QIODevice::Append)) {
+            error = QStringLiteral("无法写入归档文件 %1: %2").arg(path, file->errorString());
+            delete file;
+            return nullptr;
+        }
+        if (fresh) {
+            const QByteArray head = QByteArray("\xEF\xBB\xBF") + (header + QStringLiteral("\r\n")).toUtf8();
+            if (file->write(head) != head.size()) { error = file->errorString(); delete file; return nullptr; }
+        }
+        m_files.insert(key, file);
+        return file;
+    }
+
+    QString m_dir;
+    QHash<QString, QFile *> m_files;
+};
+}
+
+QString ArchiveMaintenance::archiveFileFor(const QString &csvArchiveDir, const QString &month, const QString &header)
+{
+    const QDir dir(csvArchiveDir);
+    for (int n = 1; n < 100; ++n) {
+        const QString path = dir.filePath(n == 1 ? QStringLiteral("record_%1.csv").arg(month)
+                                                 : QStringLiteral("record_%1_%2.csv").arg(month).arg(n));
+        QFile file(path);
+        if (!file.exists() || file.size() == 0) return path;
+        if (!file.open(QIODevice::ReadOnly)) continue;
+        QByteArray first = file.readLine();
+        if (first.startsWith("\xEF\xBB\xBF")) first.remove(0, 3);
+        if (QString::fromUtf8(first).trimmed() == header) return path;
+    }
+    return dir.filePath(QStringLiteral("record_%1_overflow.csv").arg(month));
 }
 
 bool ArchiveMaintenance::cleanup(QSqlDatabase db, const QString &archiveRoot,
     const QStringList &roots, const QDateTime &cutoff, int &removed, bool &more, QString &error,
-    CleanupStats *stats)
+    CleanupStats *stats, const QString &csvArchiveDir)
 {
     removed = 0; more = false;
     CleanupStats local;
@@ -99,12 +201,14 @@ bool ArchiveMaintenance::cleanup(QSqlDatabase db, const QString &archiveRoot,
     begin.finish();
     auto fail = [&](const QString &reason) { error = reason; db.rollback(); return false; };
 
+    RecordCsvArchive archive(csvArchiveDir);
+    const QString groupWhere = QStringLiteral(
+        "(image_path=:key OR (imagename=:key AND (image_path IS NULL OR image_path=''))) "
+        "AND datetime(createtime)<datetime(:cutoff)");
     QSqlQuery queue(db);
     queue.prepare("INSERT OR IGNORE INTO cleanup_files(path,imagename) VALUES(:path,:name)");
     QSqlQuery erase(db);
-    erase.prepare(QStringLiteral(
-        "DELETE FROM record WHERE (image_path=:key OR (imagename=:key AND (image_path IS NULL OR image_path=''))) "
-        "AND datetime(createtime)<datetime(:cutoff)"));
+    erase.prepare(QStringLiteral("DELETE FROM record WHERE ") + groupWhere);
     for (const Group &group : std::as_const(groups)) {
         if (group.safe) {
             queue.bindValue(":path", group.path); queue.bindValue(":name", group.key);
@@ -115,6 +219,12 @@ bool ArchiveMaintenance::cleanup(QSqlDatabase db, const QString &archiveRoot,
             if (s.skippedUnsafe < 5)
                 LOG_WARN("[CLEANUP] 图片路径不在图像根目录内，仅删除记录、保留文件: '{}'", group.key.left(256).toStdString());
             ++s.skippedUnsafe;
+        }
+        if (archive.enabled()) {
+            QString archiveError;
+            if (!archive.append(db, groupWhere, {{QStringLiteral(":key"), group.key}, {QStringLiteral(":cutoff"), cutoffText}},
+                                s.recordsArchived, archiveError))
+                return fail(QStringLiteral("归档过期记录失败，本轮未删除: %1").arg(archiveError));
         }
         erase.bindValue(":key", group.key); erase.bindValue(":cutoff", cutoffText);
         if (!erase.exec()) return fail(erase.lastError().text());
@@ -132,6 +242,12 @@ bool ArchiveMaintenance::cleanup(QSqlDatabase db, const QString &archiveRoot,
     requests.bindValue(":cutoff", cutoffText);
     if (!requests.exec()) return fail(requests.lastError().text());
     s.requestsDeleted = requests.numRowsAffected();
+    // 归档文件先落盘再提交删除：提交失败时下轮会重复归档同一批记录（可接受），反之会丢数据
+    {
+        QString flushError;
+        if (archive.enabled() && !archive.flush(flushError))
+            return fail(QStringLiteral("归档文件写入失败，本轮未删除: %1").arg(flushError));
+    }
     if (!db.commit()) return fail(db.lastError().text());
     if (s.skippedUnsafe > 5)
         LOG_WARN("[CLEANUP] 本轮共 {} 组图片路径不在图像根目录内，仅删除了记录", s.skippedUnsafe);
