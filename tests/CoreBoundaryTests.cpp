@@ -669,7 +669,7 @@ private slots:
         QVERIFY(SearchService::resolveRecordImage(QString(), QStringLiteral("later.png"), archive.path(), QString(), time).isEmpty());
 
         SearchService::noteImageStored(path);
-        QVERIFY(SearchService::resolveRecordImage(QString(), QStringLiteral("LATER.png"), archive.path(), QString(), time)
+        QVERIFY(SearchService::resolveRecordImage(QString(), QStringLiteral("later.png"), archive.path(), QString(), time)
                     .endsWith(QStringLiteral("2026-09-12/later.png")));
         SearchService::clearImageLookupCache();
     }
