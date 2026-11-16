@@ -2,6 +2,8 @@
 
 #include "common/AgcUtils.h"
 #include "common/AppLogger.h"
+#include "data/DatabaseGuard.h"
+#include "data/DbSchema.h"
 
 #include <QDate>
 #include <QDateTime>
@@ -476,6 +478,9 @@ QVariant run(const QSqlDatabase &db, const QString &kind, const QVariantList &ar
         result = wheelGroupRackStats(db, arg(0).toString(), arg(1).toString(), 1, 8);
     } else if (kind == QLatin1String("rackWheelMonitorStatus")) {
         result = rackWheelMonitorStatus(db);
+    } else if (kind == QLatin1String("databaseInfo")) {
+        QSqlDatabase handle = db;
+        result = DatabaseGuard::databaseInfo(handle, DBSchema::defaultDatabasePath(), DBSchema::csvArchiveDirectory());
     } else if (kind == QLatin1String("rackPhotoCounts")) {
         result = rackPhotoCounts(db);
     } else if (kind == QLatin1String("homepageCurrentDetection")) {

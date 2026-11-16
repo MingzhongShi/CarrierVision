@@ -26,15 +26,23 @@ Rectangle {
     property string datePlaceholder: "YYYY-MM-DD"
     property var resultList: ["全部", "OK", "NG"]
     property bool includeResult: true
+    // 默认查询最近几天（含今天）
+    property int defaultRangeDays: 1
 
     // ===== 信号 =====
     signal searchClicked(string startDate, string endDate, int rackno, string turno, string result, string keyword)
     signal resetClicked()
 
+    function resetDates() {
+        var today = new Date()
+        var start = new Date(today)
+        start.setDate(start.getDate() - Math.max(0, defaultRangeDays - 1))
+        startDateField.dateString = Qt.formatDate(start, "yyyy-MM-dd")
+        endDateField.dateString = Qt.formatDate(today, "yyyy-MM-dd")
+    }
+
     function clearAll() {
-        var today = Qt.formatDate(new Date(), "yyyy-MM-dd")
-        startDateField.dateString = today
-        endDateField.dateString = today
+        resetDates()
         rackField.selectedValue = 0
         wheelSelector.reset()
         resultCombo.currentIndex = 0
@@ -253,9 +261,5 @@ Rectangle {
         }
     }
 
-    Component.onCompleted: {
-        var today = Qt.formatDate(new Date(), "yyyy-MM-dd")
-        startDateField.dateString = today
-        endDateField.dateString = today
-    }
+    Component.onCompleted: resetDates()
 }

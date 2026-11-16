@@ -10,13 +10,19 @@ struct CleanupStats {
     int filesDeleted = 0;    // 删除的图片文件
     int skippedUnsafe = 0;   // 路径不在图像根目录内：只删记录、保留文件
     int requestsDeleted = 0; // 清除的过期 TCP 重发去重记录（ingest_requests）
+    int recordsArchived = 0; // 删除前写入 CSV 归档的检测记录
 };
 
 // Deletes only DB-referenced, expired image files. Never deletes a directory.
 // 记录按实际落盘路径 image_path 分组（为空时按 imagename）；路径不安全的组只删除记录，保证每轮都有进展。
 bool cleanup(QSqlDatabase db, const QString &archiveRoot, const QStringList &managedRoots,
              const QDateTime &cutoff, int &removed, bool &more, QString &error,
-             CleanupStats *stats = nullptr);
+             CleanupStats *stats = nullptr, const QString &csvArchiveDir = QString());
+
+// csvArchiveDir 非空时，过期记录删除前按记录月份追加到 csvArchiveDir/record_yyyy-MM.csv
+// （UTF-8 带 BOM，Excel 可直接打开）。列取 record 表当前全部列；表结构变化导致表头不同时
+// 写入 record_yyyy-MM_2.csv 等新文件，不改动旧文件。返回某月应写入的文件路径。
+QString archiveFileFor(const QString &csvArchiveDir, const QString &month, const QString &header);
 
 // 删除图像根目录下修改时间早于 olderThan、且没有任何记录引用的图片（孤儿文件）。
 // 每次最多删除 maxFiles 个；返回删除数量。不删除目录、隐藏文件与仍有 .cv-pending 标记的文件。

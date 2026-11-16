@@ -198,6 +198,8 @@ int main(int argc, char *argv[])
             pragmaQuery.exec("PRAGMA journal_mode = WAL;");
             pragmaQuery.exec("PRAGMA busy_timeout = 5000;");
             pragmaQuery.exec("PRAGMA synchronous = NORMAL;");
+            // 检查点之后把 WAL 文件截断到 64 MB 以内，避免一次大批写入后 WAL 长期占用空间
+            pragmaQuery.exec("PRAGMA journal_size_limit = 67108864;");
 
             // 日志级别：system_config 中的 log/level 优先；未配置时发布版 info、调试版 debug
 #ifdef NDEBUG
@@ -209,6 +211,15 @@ int main(int argc, char *argv[])
             if (!AppLogger::setLevel(configuredLevel)) {
                 AppLogger::setLevel(defaultLevel);
                 LOG_WARN("日志级别配置无效: '{}'，使用默认 {}", configuredLevel.toStdString(), defaultLevel.toStdString());
+            }
+
+            // 删除记录释放的空间可在每日维护中归还磁盘：新库直接启用增量回收，
+            // 512 MB 以内的旧库在此做一次 VACUUM（约 10～30 秒）完成切换（此时尚无其他连接）
+            {
+                QString vacuumDetail;
+                const bool vacuumOk = DatabaseGuard::enableIncrementalVacuum(db, qint64(512) * 1024 * 1024, vacuumDetail);
+                if (!vacuumOk) LOG_WARN("[DB] {}", vacuumDetail.toStdString());
+                else if (!vacuumDetail.isEmpty()) LOG_INFO("[DB] {}", vacuumDetail.toStdString());
             }
 
             // 集中创建所有表结构

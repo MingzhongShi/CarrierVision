@@ -73,6 +73,7 @@ QSqlDatabase AppControllerInternal::getThreadDatabase()
         // 默认页缓存只有 2 MB，统计和查询页反复按日期范围读索引时几乎每次都要重新从文件读；
         // 后台连接最多 5 个（查询 2、统计 2、维护 1），每个 16 MB 上限，按需分配
         pragma.exec("PRAGMA cache_size = -16384;");
+        pragma.exec("PRAGMA journal_size_limit = 67108864;");
     }
     return db;
 }

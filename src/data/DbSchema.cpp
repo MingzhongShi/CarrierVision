@@ -6,6 +6,7 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QSettings>
 #include <QElapsedTimer>
 #include <nlohmann/json.hpp>
@@ -49,6 +50,10 @@ QString DBSchema::getConfig(QSqlDatabase &db, const QString &key, const QString 
         return q.value(0).toString();
     }
     return defaultValue;
+}
+
+QString DBSchema::csvArchiveDirectory() {
+    return QFileInfo(defaultDatabasePath()).absolutePath() + QStringLiteral("/archive");
 }
 
 int DBSchema::getConfigInt(QSqlDatabase &db, const QString &key, int defaultValue) {
@@ -554,6 +559,7 @@ bool DBSchema::ensureAllTables(QSqlDatabase &db){
     q.exec("INSERT OR IGNORE INTO system_config(key, value, updated_at) VALUES('cleanup/keepDays', '90', datetime('now', 'localtime'))");
     q.exec("INSERT OR IGNORE INTO system_config(key, value, updated_at) VALUES('cleanup/logKeepDays', '30', datetime('now', 'localtime'))");
     q.exec("INSERT OR IGNORE INTO system_config(key, value, updated_at) VALUES('cleanup/runHour', '1', datetime('now', 'localtime'))");
+    q.exec("INSERT OR IGNORE INTO system_config(key, value, updated_at) VALUES('cleanup/archiveCsv', 'true', datetime('now', 'localtime'))");
     q.exec("INSERT OR IGNORE INTO system_config(key, value, updated_at) VALUES('ui/isDark', 'false', datetime('now', 'localtime'))");
     {
         QSqlQuery qDef(db);

@@ -145,6 +145,10 @@ public:
     Q_INVOKABLE void setCleanupKeepDays(int days);
     Q_INVOKABLE void setCleanupLogKeepDays(int days);
     Q_INVOKABLE void setCleanupRunHour(int hour);
+    // 过期记录删除前是否归档为按月 CSV（data/archive），默认开启
+    Q_INVOKABLE bool cleanupArchiveCsv() const;
+    Q_INVOKABLE void setCleanupArchiveCsv(bool enabled);
+    Q_INVOKABLE void openCsvArchiveDirectory();
     Q_INVOKABLE bool saveHomepageDescription(const QString &description);
     Q_INVOKABLE bool isDarkMode() const;
     Q_INVOKABLE void setDarkMode(bool dark);

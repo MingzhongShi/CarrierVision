@@ -8,6 +8,8 @@ namespace DBSchema {
 // Returns the canonical database path (${AppDir}/data/dataAgc.db),
 // and auto-relocates legacy ${AppDir}/dataAgc.db (plus -wal, -shm) if present.
 QString defaultDatabasePath();
+// 过期记录 CSV 归档目录：数据库目录下的 archive/
+QString csvArchiveDirectory();
 
 // Ensure all required tables and indices exist. Returns true on success.
 bool ensureAllTables(QSqlDatabase &db);
