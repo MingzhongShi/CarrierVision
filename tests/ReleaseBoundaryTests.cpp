@@ -506,6 +506,8 @@ private slots:
                                        "/elsewhere/5.png", "d/6.png", root + "/d/7.png"};
         for (int i = 0; i < paths.size(); ++i) { q.bindValue(":w", i + 1); q.bindValue(":p", paths.at(i)); QVERIFY(q.exec()); }
         q.finish();
+        // 空 QString 绑定后写入的是 NULL：用 SQL 字面量写入真正的空串
+        QVERIFY(q.exec("UPDATE record SET image_path='' WHERE wheel_id=5"));
         auto stored = [&]() {
             QStringList out; QSqlQuery s(db);
             if (!s.exec("SELECT COALESCE(image_path,'<null>') FROM record ORDER BY rowid")) return out;
