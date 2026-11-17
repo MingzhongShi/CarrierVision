@@ -218,8 +218,11 @@ private slots:
         wheel.imageName = "one.png";
         batch.wheels = {wheel};
         QString error;
-        QVERIFY2(ImageIngest::recordBatch(db, batch, error), qPrintable(error));
-        QVERIFY2(ImageIngest::recordBatch(db, batch, error), qPrintable(error));
+        bool duplicate = true;
+        QVERIFY2(ImageIngest::recordBatch(db, batch, error, QString(), &duplicate), qPrintable(error));
+        QVERIFY(!duplicate);
+        QVERIFY2(ImageIngest::recordBatch(db, batch, error, QString(), &duplicate), qPrintable(error));
+        QVERIFY(duplicate);
         QSqlQuery q(db);
         QVERIFY(q.exec("SELECT COUNT(*) FROM record WHERE batch_id='batch-idempotent'"));
         QVERIFY(q.next());
