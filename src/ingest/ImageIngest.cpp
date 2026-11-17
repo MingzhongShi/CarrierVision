@@ -253,8 +253,9 @@ bool parseBatchJson(const QJsonObject &obj, BatchData &out, QString &error, cons
     return true;
 }
 
-bool recordBatch(QSqlDatabase db, const BatchData &batch, QString &error, const QString &imageRoot)
+bool recordBatch(QSqlDatabase db, const BatchData &batch, QString &error, const QString &imageRoot, bool *duplicate)
 {
+    if (duplicate) *duplicate = false;
     for (const WheelItem &wheel : batch.wheels) {
         if (wheel.wheelId < 1 || wheel.wheelId > 16) {
             error = QStringLiteral("轮号 %1 超出有效范围 [1, 16]").arg(wheel.wheelId);
@@ -294,6 +295,7 @@ bool recordBatch(QSqlDatabase db, const BatchData &batch, QString &error, const 
                 return false;
             }
             db.rollback();
+            if (duplicate) *duplicate = true;
             return true;
         }
     }

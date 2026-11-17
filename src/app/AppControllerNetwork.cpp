@@ -326,7 +326,17 @@ void AppController::submitTcpBatch(const QJsonObject &batchData, TcpDataReceiver
         QSqlDatabase db = getThreadDatabase();
         bool ok = db.isValid() && db.isOpen();
         if (!ok) error = QStringLiteral("数据库连接不可用");
-        else ok = ImageIngest::recordBatch(db, batch, error, archiveDir);
+        bool duplicate = false;
+        if (ok) ok = ImageIngest::recordBatch(db, batch, error, archiveDir, &duplicate);
+        if (ok && duplicate) {
+            // 重发的批次已入库过：不改记录、不刷新卡片，缓存里的图片留给原批次的回填
+            QMetaObject::invokeMethod(this, [batch, done]() {
+                LOG_INFO("[TCP] 载具 #{} 重发批次已入库过，忽略: requestId={}, 轮数={}",
+                         batch.carrierId, batch.requestId.toStdString(), batch.wheels.size());
+                done(true, QString());
+            }, Qt::QueuedConnection);
+            return;
+        }
 
         QVector<ImageItem> cards;
         if (ok) {

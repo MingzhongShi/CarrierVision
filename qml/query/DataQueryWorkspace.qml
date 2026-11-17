@@ -639,7 +639,9 @@ Item {
                                         id: preview
                                         anchors.centerIn: parent
                                         sourceSize: Qt.size(8192, 8192)
-                                        fillMode: Image.PreserveAspectFit
+                                        // 宽高已按原图比例给出：用 Stretch 让 implicitWidth/Height 固定为原图尺寸，
+                                        // PreserveAspectFit 会随宽高回算隐式尺寸，与 fitScale 形成绑定循环
+                                        fillMode: Image.Stretch
                                         asynchronous: true
                                         cache: false
                                         smooth: true

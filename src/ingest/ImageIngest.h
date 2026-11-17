@@ -49,7 +49,9 @@ bool parseBatchJson(const QJsonObject &obj, BatchData &out, QString &error, cons
 // 文件名超过 AgcUtils::kMaxImageNameLength 时同样拒绝
 QString normalizeImageName(const QString &raw, QString &error, bool *strippedPath = nullptr);
 // imageRoot 非空时，图像根目录内的 imagePath 以相对路径入库（见 AgcUtils::toImageRootRelative）
-bool recordBatch(QSqlDatabase db, const BatchData &batch, QString &error, const QString &imageRoot = QString());
+// duplicate 非空时报告本批是否为已入库 requestId 的重发（返回 true 但未写入任何记录）
+bool recordBatch(QSqlDatabase db, const BatchData &batch, QString &error, const QString &imageRoot = QString(),
+                 bool *duplicate = nullptr);
 // 记录先于图片到达时补写实际落盘路径：只匹配 since 之后、尚未关联的同名记录（不区分大小写）。
 // 返回补写的行数，失败返回 -1 并给出原因
 int linkRecordImage(QSqlDatabase db, const QString &imageName, const QString &absolutePath,

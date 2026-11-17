@@ -728,7 +728,7 @@ Page {
 
                 contentItem: TextField {
                     leftPadding: Theme.space3
-                    rightPadding: root.handlerNames.length > 0 ? 30 : Theme.space3
+                    rightPadding: root.handlerNames.length > 0 ? 36 : Theme.space3
                     text: operatorCombo.editText
                     placeholderText: "请输入或选择处置人员"
                     placeholderTextColor: Theme.muted
@@ -741,15 +741,23 @@ Page {
                     verticalAlignment: Text.AlignVCenter
                     inputMethodHints: Qt.ImhNoPredictiveText
                     background: Item {}
+                    // 可编辑下拉框的输入区会吃掉鼠标，原来只有右侧箭头一小条能展开名单：点输入区也展开
+                    onPressed: if (root.handlerNames.length > 0 && !operatorCombo.popup.visible) operatorCombo.popup.open()
                 }
 
-                indicator: AppIcon {
+                // 箭头区域占满右侧 36px 高度，整块都可点击展开 / 收起名单
+                indicator: Item {
                     visible: root.handlerNames.length > 0
-                    x: operatorCombo.width - width - Theme.space3
-                    y: (operatorCombo.height - height) / 2
-                    name: "icon_arrow_down"
-                    size: 12
-                    color: Theme.textSoft
+                    x: operatorCombo.width - width
+                    width: 36
+                    height: operatorCombo.height
+
+                    AppIcon {
+                        anchors.centerIn: parent
+                        name: "icon_arrow_down"
+                        size: 12
+                        color: Theme.textSoft
+                    }
                 }
 
                 popup: Popup {
