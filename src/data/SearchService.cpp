@@ -451,20 +451,20 @@ QVariantMap alertOperation(const QSqlDatabase &db, const QString &kind,
             if (query.exec()) return true;
         }
         LOG_ERROR("报警操作查询失败，架号={}，轮位={}，操作={}: {}",
-                  rack, wheel, kind.toStdString(), query.lastError().text().toStdString());
+                  rack, WheelIdentity::logName(wheel).toStdString(), kind.toStdString(), query.lastError().text().toStdString());
         return false;
     };
     if (kind == QLatin1String("handled") || kind == QLatin1String("falseAlarm")) {
         filter.where << QStringLiteral("is_handled = 0 AND is_false_alarm = 0");
         const QString column = kind == QLatin1String("handled") ? QStringLiteral("is_handled") : QStringLiteral("is_false_alarm");
         if (!execute(QStringLiteral("UPDATE record SET %1 = 1").arg(column) + filter.clause())) {
-            LOG_ERROR("报警处置失败，架号={}，轮位={}: {}", rack, wheel, query.lastError().text().toStdString());
+            LOG_ERROR("报警处置失败，架号={}，轮位={}: {}", rack, WheelIdentity::logName(wheel).toStdString(), query.lastError().text().toStdString());
             return fail(QStringLiteral("保存处置状态失败，请查看日志"));
         }
         const qint64 affected = query.numRowsAffected();
         LOG_INFO("报警处置完成，操作员={}，架号={}，轮位={}，操作={}，日期={} 至 {}，更新记录={}",
                  operatorName.isEmpty() ? std::string("未填写") : operatorName.toStdString(),
-                 rack, wheel, kind == QLatin1String("handled") ? "已处理（已换轮）" : "误报",
+                 rack, WheelIdentity::logName(wheel).toStdString(), kind == QLatin1String("handled") ? "已处理（已换轮）" : "误报",
                  start.toStdString(), end.toStdString(), affected);
         return {{QStringLiteral("ok"), true}, {QStringLiteral("affected"), affected}};
     }

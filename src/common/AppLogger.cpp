@@ -1,4 +1,5 @@
 #include "common/AppLogger.h"
+#include "common/WheelIdentity.h"
 #include <QHash>
 
 #include <QCoreApplication>
@@ -706,7 +707,9 @@ bool scanVolume(const LogVolume &volume, qint64 from, const LogFilter &filter, c
         const auto match = lineRe.match(line);
         const QString time = match.hasMatch() ? match.captured(1) : QString();
         const QString lvl = match.hasMatch() ? match.captured(2).toLower() : QStringLiteral("info");
-        const QString message = match.hasMatch() ? match.captured(3) : line;
+        QString message = match.hasMatch() ? match.captured(3) : line;
+        // 报警处置日志的轮位按"走行轮N / 驱动轮N"显示，旧日志里的总序号在这里换算，筛选与导出同样生效
+        if (message.startsWith(alertDispositionPrefix)) message = WheelIdentity::rewriteLogWheel(message);
         bool pass = true;
         if (!filter.level.isEmpty() && filter.level!="all") {
             if (filter.level=="warn" || filter.level=="warning") pass = lvl=="warn" || lvl=="warning";

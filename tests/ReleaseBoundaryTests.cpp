@@ -1555,6 +1555,13 @@ private slots:
         // 类型与级别、关键字同时生效
         QCOMPARE(AppLogger::queryLogs(date, "warn", "", 1, 20, "alertDisposition").value("total").toInt(), 1);
         QCOMPARE(AppLogger::queryLogs(date, "all", "张三", 1, 20, "alertDisposition").value("total").toInt(), 1);
+        // 旧日志的总序号轮位按"走行轮N / 驱动轮N"显示，并可按名称筛选
+        QCOMPARE(AppLogger::queryLogs(date, "all", "走行轮3", 1, 20, "alertDisposition").value("total").toInt(), 1);
+        QCOMPARE(AppLogger::queryLogs(date, "all", "走行轮2", 1, 20, "alertDisposition").value("total").toInt(), 1);
+        bool sawWheelName = false;
+        for (const auto &item : alerts.value("items").toList())
+            sawWheelName = sawWheelName || item.toMap().value("message").toString().contains(QStringLiteral("轮位=走行轮3"));
+        QVERIFY(sawWheelName);
         // 未指定类型或 all 时不过滤
         QVERIFY(AppLogger::queryLogs(date, "all", "", 1, 20).value("total").toInt() >= 4);
         QCOMPARE(AppLogger::queryLogs(date, "all", "", 1, 20, "all").value("total").toInt(),

@@ -301,6 +301,19 @@ private slots:
             QCOMPARE(WheelIdentity::typeIndex(value), 0);
             QVERIFY(WheelIdentity::tagName(value).isEmpty());
         }
+        QCOMPARE(WheelIdentity::logName(0), QStringLiteral("全部"));
+        QCOMPARE(WheelIdentity::logName(3), QStringLiteral("走行轮3"));
+        QCOMPARE(WheelIdentity::logName(10), QStringLiteral("驱动轮2"));
+        QCOMPARE(WheelIdentity::logName(17), QStringLiteral("17"));
+        QCOMPARE(WheelIdentity::rewriteLogWheel(QStringLiteral(
+                     "报警处置完成，操作员=张三，架号=3，轮位=10，操作=误报，日期=2026-11-08 至 2026-11-14，更新记录=1")),
+                 QStringLiteral("报警处置完成，操作员=张三，架号=3，轮位=驱动轮2，操作=误报，日期=2026-11-08 至 2026-11-14，更新记录=1"));
+        QCOMPARE(WheelIdentity::rewriteLogWheel(QStringLiteral("报警处置被拒绝，架号=7，轮位=2：请填写处置人员")),
+                 QStringLiteral("报警处置被拒绝，架号=7，轮位=走行轮2：请填写处置人员"));
+        QCOMPARE(WheelIdentity::rewriteLogWheel(QStringLiteral("报警处置完成，架号=1，轮位=驱动轮1，更新记录=2")),
+                 QStringLiteral("报警处置完成，架号=1，轮位=驱动轮1，更新记录=2"));
+        QCOMPARE(WheelIdentity::rewriteLogWheel(QStringLiteral("报警处置失败，架号=1，轮位=0")),
+                 QStringLiteral("报警处置失败，架号=1，轮位=全部"));
         QCOMPARE(WheelIdentity::csvIdentity(1), QStringLiteral("1,1,walk,1"));
         QCOMPARE(WheelIdentity::csvIdentity(9), QStringLiteral("9,9,drive,1"));
         for (const QString &name : {QString(), QStringLiteral("相机1"), QStringLiteral("驱动轮9"),

@@ -3,6 +3,7 @@
 #include "app/AppControllerInternal.h"
 #include "data/DbSchema.h"
 #include "common/AppLogger.h"
+#include "common/WheelIdentity.h"
 
 #include "common/AgcUtils.h"
 #include "ingest/ImageIngest.h"
@@ -116,7 +117,7 @@ int AppController::requestAlertOperation(const QString &kind, const QString &sta
         if (operatorText.isEmpty())
             error = QStringLiteral("请填写处置人员");
         if (!error.isEmpty()) {
-            LOG_WARN("报警处置被拒绝，架号={}，轮位={}：{}", rack, wheel, error.toStdString());
+            LOG_WARN("报警处置被拒绝，架号={}，轮位={}：{}", rack, WheelIdentity::logName(wheel).toStdString(), error.toStdString());
             QMetaObject::invokeMethod(this, [this, requestId, error]() {
                 emit alertOperationFinished(requestId, {{QStringLiteral("ok"), false},
                                                         {QStringLiteral("error"), error}});
