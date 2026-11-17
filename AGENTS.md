@@ -21,6 +21,8 @@
 - 所有相对路径一律按程序所在目录解析（`AgcUtils::resolveAppPath`），不得依赖启动时的工作目录。
 - 程序目录内的路径保存为相对路径（`AgcUtils::toAppRelativePath`），安装目录整体搬迁后配置仍然有效。不要把规范化后的绝对路径写回数据库。
 - 图像只有一个目录：FTP 上传目录就是图像存储目录（数据库键 `ftp/rootDirectory`，默认 `images`）。不要再引入第二个图像根目录。
+- `record.image_path` 存相对图像目录的路径（`AgcUtils::toImageRootRelative`，"/" 分隔，如 `2026-11-16/a_v2.png`），读取时用 `AgcUtils::imagePathFromRecord` 按当前图像目录还原；图像目录整体搬迁后记录仍有效。旧版写入的绝对路径继续兼容，按引用判断是否删除文件的地方（过期清理、孤儿清理）必须同时匹配相对与绝对两种写法。
+- 旧库的绝对路径由每日维护在当天备份成功后分批改写（`ArchiveMaintenance::migrateImagePathsToRelative`，进度键 `db/imagePathRelativeRowId`，完成键 `db/imagePathRelativeDone`），首次迁移前另存 `data/backup/before-image-path-relative.db`（不参与备份轮换）。回滚：退出程序后用该备份替换数据库（会丢失迁移后的新记录），或执行 `UPDATE record SET image_path = '<图像目录>/' || image_path WHERE image_path <> '' AND image_path NOT LIKE '/%' AND image_path NOT LIKE '_:%';` 改回绝对路径，并删除上述两个配置键。
 - 程序目录布局：`data/`（数据库与备份）、`images/`、`logs/`、`assets/`（`fonts/` 界面字体、`models/` 首页三维模型，运行时按文件加载，不编进程序资源）。FTP 日志已并入主日志，不要再单独写日志文件。升级只替换程序文件，不得覆盖或清理这些数据。
 
 ## 4. 线程与日志

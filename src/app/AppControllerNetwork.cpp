@@ -326,7 +326,7 @@ void AppController::submitTcpBatch(const QJsonObject &batchData, TcpDataReceiver
         QSqlDatabase db = getThreadDatabase();
         bool ok = db.isValid() && db.isOpen();
         if (!ok) error = QStringLiteral("数据库连接不可用");
-        else ok = ImageIngest::recordBatch(db, batch, error);
+        else ok = ImageIngest::recordBatch(db, batch, error, archiveDir);
 
         QVector<ImageItem> cards;
         if (ok) {
@@ -407,11 +407,12 @@ void AppController::onFtpImageStored(const QString &filePath, const QString &req
 
     // 记录先到的情况：补写实际路径。仅限最近 1 小时、尚未关联的记录，
     // 避免升级前的历史记录（image_path 均为空）被同名新图误关联。与批次入库在同一写库线程按到达顺序执行
-    (void)QtConcurrent::run(&m_writePool, [this, requestedName, absolutePath, now]() {
+    const QString imageRoot = m_archiveDirectory;
+    (void)QtConcurrent::run(&m_writePool, [this, requestedName, absolutePath, now, imageRoot]() {
         QString linkError;
         QSqlDatabase db = getThreadDatabase();
         int linkedRows = db.isValid() && db.isOpen()
-            ? ImageIngest::linkRecordImage(db, requestedName, absolutePath, now.addSecs(-3600), linkError)
+            ? ImageIngest::linkRecordImage(db, requestedName, absolutePath, now.addSecs(-3600), linkError, imageRoot)
             : -1;
         if (linkedRows < 0 && linkError.isEmpty()) linkError = QStringLiteral("数据库连接不可用");
         QMetaObject::invokeMethod(this, [this, requestedName, absolutePath, linkedRows, linkError]() {

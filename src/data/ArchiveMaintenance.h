@@ -2,6 +2,7 @@
 #include <QSqlDatabase>
 #include <QStringList>
 #include <QDateTime>
+#include <atomic>
 namespace ArchiveMaintenance {
 
 struct CleanupStats {
@@ -28,4 +29,21 @@ QString archiveFileFor(const QString &csvArchiveDir, const QString &month, const
 // 每次最多删除 maxFiles 个；返回删除数量。不删除目录、隐藏文件与仍有 .cv-pending 标记的文件。
 int sweepOrphans(QSqlDatabase db, const QStringList &managedRoots, const QDateTime &olderThan,
                  int maxFiles, QString &error);
+
+// 旧库迁移：record.image_path 中位于 imageRoot 内的绝对路径改写为相对图像根目录的路径
+// （AgcUtils::toImageRootRelative，不在根目录内的路径保持不变）。按 rowid 区间分批，每批一个短写事务，
+// 断点与完成标记随改写在同一事务内写入 system_config，中断（退出、断电、出错）后下次从断点继续，不会重复或遗漏。
+// stop 置位时在批次之间停止。调用方负责迁移前备份数据库（见 AppController::runScheduledTasks）。
+inline constexpr const char *kImagePathMigrationDoneKey = "db/imagePathRelativeDone";
+inline constexpr const char *kImagePathMigrationRowKey = "db/imagePathRelativeRowId";
+struct ImagePathMigration {
+    bool ok = true;
+    bool done = false;     // 已处理到表尾（或此前已完成）
+    qint64 converted = 0;  // 本次改写的行数
+    int batches = 0;
+    QString error;
+};
+ImagePathMigration migrateImagePathsToRelative(QSqlDatabase db, const QString &imageRoot,
+                                               const std::atomic_bool *stop = nullptr,
+                                               int batchRows = 5000, int pauseMs = 20);
 }

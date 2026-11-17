@@ -326,6 +326,7 @@ private:
     bool m_tcpStoppedByUser = false;
     QTimer m_warnNotifyTimer;
     std::atomic_bool m_warnNotifyPending{false};
+    std::atomic_bool m_shuttingDown{false}; // 退出时通知维护线程中的长任务（图片路径迁移）在批次之间停止
     std::atomic<int> m_searchGeneration{0};
     std::atomic<int> m_alertSearchGeneration{0};
 };

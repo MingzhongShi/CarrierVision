@@ -692,6 +692,29 @@ private slots:
         SearchService::clearImageLookupCache();
     }
 
+    void relativeImagePathResolvesAgainstImageRoot()
+    {
+        // 新记录 image_path 存相对图像根目录的路径：按当前图像目录解析；整个目录搬迁后仍能找到
+        SearchService::clearImageLookupCache();
+        QTemporaryDir archive;
+        QVERIFY(archive.isValid());
+        QVERIFY(QDir().mkpath(archive.filePath(QStringLiteral("2026-09-12"))));
+        QFile image(archive.filePath(QStringLiteral("2026-09-12/stored_v2.png")));
+        QVERIFY(image.open(QIODevice::WriteOnly));
+        image.write("x");
+        image.close();
+        // 文件名与 imagename 不同（_v2 防重名），只有 image_path 能找到
+        QCOMPARE(SearchService::resolveRecordImage(QStringLiteral("2026-09-12/stored_v2.png"), QStringLiteral("stored.png"),
+                                                   archive.path(), QString(), QStringLiteral("2026-09-12 08:00:00")),
+                 QFileInfo(image.fileName()).absoluteFilePath());
+        QCOMPARE(AgcUtils::imagePathFromRecord(QStringLiteral("2026-09-12/a.png"), QStringLiteral("/data/images")),
+                 QStringLiteral("/data/images/2026-09-12/a.png"));
+        QCOMPARE(AgcUtils::imagePathFromRecord(QStringLiteral("/old/images/a.png"), QStringLiteral("/data/images")),
+                 QStringLiteral("/old/images/a.png"));
+        QVERIFY(AgcUtils::imagePathFromRecord(QString(), QStringLiteral("/data/images")).isEmpty());
+        SearchService::clearImageLookupCache();
+    }
+
     void wheelCountsFollowInsertsDeletesAndMigration()
     {
         // 计数表随插入、删除维护；旧库（没有计数表）升级时按现有记录补全

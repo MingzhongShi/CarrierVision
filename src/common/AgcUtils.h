@@ -12,6 +12,11 @@ QString normalizedPath(const QString &path);
 QString resolveAppPath(const QString &path);
 // 位于程序目录内的路径转为相对路径，便于整体搬迁安装目录；其余路径原样返回规范化绝对路径
 QString toAppRelativePath(const QString &path);
+// 记录中的图片路径（record.image_path）存为相对图像根目录的路径（"/" 分隔），便于整体搬迁图像目录。
+// 不在 root 内的路径原样返回；Windows 下前缀比较不区分大小写
+QString toImageRootRelative(const QString &path, const QString &root);
+// record.image_path 转为绝对路径：相对路径按 root 解析，绝对路径（旧版写入）原样规范化；空值返回空串
+QString imagePathFromRecord(const QString &stored, const QString &root);
 QString formatDateTime(const QDateTime &dateTime);
 QDateTime parseFlexibleDateTime(const QString &text, bool endOfDay = false);
 bool isImageFile(const QString &fileName);

@@ -44,6 +44,34 @@ QString normalizedPath(const QString &path)
     return QDir::cleanPath(QFileInfo(trimmed).absoluteFilePath());
 }
 
+QString toImageRootRelative(const QString &path, const QString &root)
+{
+    if (path.isEmpty() || root.trimmed().isEmpty()) return path;
+    const QString file = QDir::cleanPath(QDir::fromNativeSeparators(path));
+    QString base = QDir::cleanPath(QDir::fromNativeSeparators(root.trimmed()));
+    if (!QDir::isAbsolutePath(file) || !QDir::isAbsolutePath(base)) return path;
+    if (!base.endsWith(u'/')) base += u'/';
+#ifdef Q_OS_WIN
+    constexpr Qt::CaseSensitivity cs = Qt::CaseInsensitive;
+#else
+    constexpr Qt::CaseSensitivity cs = Qt::CaseSensitive;
+#endif
+    if (file.size() <= base.size() || !file.startsWith(base, cs)) return path;
+    const QString relative = file.mid(base.size());
+    if (relative == QLatin1String("..") || relative.startsWith(QLatin1String("../"))) return path;
+    return relative;
+}
+
+QString imagePathFromRecord(const QString &stored, const QString &root)
+{
+    const QString trimmed = stored.trimmed();
+    if (trimmed.isEmpty()) return {};
+    const QString path = QDir::fromNativeSeparators(trimmed);
+    if (QDir::isAbsolutePath(path)) return QDir::cleanPath(path);
+    if (root.trimmed().isEmpty()) return {};
+    return QDir::cleanPath(QDir(root.trimmed()).filePath(path));
+}
+
 QString resolveAppPath(const QString &path)
 {
     const QString trimmed = path.trimmed();

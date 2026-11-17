@@ -427,6 +427,114 @@ private slots:
         QVERIFY(!QFile::exists(versioned));
         QVERIFY(q.exec("SELECT COUNT(*) FROM record")); QVERIFY(q.next()); QCOMPARE(q.value(0).toInt(), 0);
     }
+    void imagePathsStoredRelativeToImageRoot() {
+        QTemporaryDir dir;
+        const QString root = QDir::cleanPath(dir.path());
+        QCOMPARE(AgcUtils::toImageRootRelative(root + "/2026-11-16/a.png", root), QString("2026-11-16/a.png"));
+        QCOMPARE(AgcUtils::toImageRootRelative(root + "/2026-11-16/a.png", root + "/"), QString("2026-11-16/a.png"));
+        // 根目录外（含同名前缀目录）、已是相对路径、根目录为空：原样返回
+        QCOMPARE(AgcUtils::toImageRootRelative(root + "-other/a.png", root), root + "-other/a.png");
+        QCOMPARE(AgcUtils::toImageRootRelative("/elsewhere/a.png", root), QString("/elsewhere/a.png"));
+        QCOMPARE(AgcUtils::toImageRootRelative("2026-11-16/a.png", root), QString("2026-11-16/a.png"));
+        QCOMPARE(AgcUtils::toImageRootRelative(root + "/a.png", QString()), root + "/a.png");
+#ifdef Q_OS_WIN
+        QCOMPARE(AgcUtils::toImageRootRelative("D:\\Images\\2026-11-16\\a.png", "d:/images"), QString("2026-11-16/a.png"));
+#endif
+
+        ImageIngest::BatchData batch;
+        batch.carrierId = 3;
+        batch.timestamp = QDateTime::currentDateTime();
+        batch.batchId = "batch-relative";
+        ImageIngest::WheelItem inside;
+        inside.wheelId = 1; inside.cameraId = 1; inside.result = 1;
+        inside.imageName = "in.png"; inside.imagePath = root + "/2026-11-16/in.png";
+        ImageIngest::WheelItem outside = inside;
+        outside.wheelId = 2; outside.imageName = "out.png"; outside.imagePath = "/elsewhere/out.png";
+        ImageIngest::WheelItem late = inside;
+        late.wheelId = 3; late.imageName = "late.png"; late.imagePath.clear();
+        batch.wheels = {inside, outside, late};
+        QString error;
+        QVERIFY2(ImageIngest::recordBatch(db, batch, error, root), qPrintable(error));
+        QCOMPARE(ImageIngest::linkRecordImage(db, "LATE.png", root + "/2026-11-16/late_v2.png",
+                                              QDateTime::currentDateTime().addSecs(-3600), error, root), 1);
+        QSqlQuery q(db);
+        QVERIFY(q.exec("SELECT imagename, image_path FROM record WHERE batch_id='batch-relative' ORDER BY wheel_id"));
+        QStringList stored;
+        while (q.next()) stored << q.value(0).toString() + "=" + q.value(1).toString();
+        QCOMPARE(stored, QStringList({"in.png=2026-11-16/in.png", "out.png=/elsewhere/out.png",
+                                      "late.png=2026-11-16/late_v2.png"}));
+    }
+    void cleanupAndOrphanSweepHonorRelativeImagePaths() {
+        QTemporaryDir dir;
+        const QString day = "2025-01-01";
+        QVERIFY(QDir().mkpath(dir.filePath(day)));
+        const QString expired = dir.filePath(day + "/expired_v2.png");
+        const QString shared = dir.filePath(day + "/shared.png");
+        QVERIFY(makeImage(expired)); QVERIFY(makeImage(shared));
+        QSqlQuery q(db);
+        q.prepare("INSERT INTO record(createtime,carrier_id,camera_id,wheel_id,result,imagename,image_path) VALUES(:t,1,1,:w,1,:n,:p)");
+        auto add = [&](const QString &time, int wheel, const QString &name, const QString &path) {
+            q.bindValue(":t", time); q.bindValue(":w", wheel); q.bindValue(":n", name); q.bindValue(":p", path); return q.exec();
+        };
+        // 过期且只被相对路径引用：记录与文件一起删除
+        QVERIFY(add("2025-01-01 00:00:00", 1, "expired.png", day + "/expired_v2.png"));
+        // 同一文件：过期记录存绝对路径（迁移前），新记录存相对路径，文件必须保留
+        QVERIFY(add("2025-01-01 00:00:00", 2, "old-name.png", QDir::cleanPath(shared)));
+        QVERIFY(add(AgcUtils::formatDateTime(QDateTime::currentDateTime()), 3, "new-name.png", day + "/shared.png"));
+        q.finish();
+        int removed = 0; bool more = false; QString error;
+        QVERIFY2(ArchiveMaintenance::cleanup(db, dir.path(), {dir.path()},
+                 QDateTime::fromString("2026-01-01T00:00:00", Qt::ISODate), removed, more, error), qPrintable(error));
+        QVERIFY(!QFile::exists(expired));
+        QVERIFY(QFile::exists(shared));
+        QCOMPARE(removed, 1);
+        QVERIFY(q.exec("SELECT COUNT(*) FROM cleanup_files")); QVERIFY(q.next()); QCOMPARE(q.value(0).toInt(), 0);
+
+        // 孤儿清理：文件名与 imagename 不同，只靠相对 image_path 认出引用
+        QFile f(shared);
+        QVERIFY(f.open(QIODevice::ReadWrite) && f.setFileTime(QDateTime::currentDateTime().addDays(-200), QFileDevice::FileModificationTime));
+        f.close();
+        QCOMPARE(ArchiveMaintenance::sweepOrphans(db, {dir.path()}, QDateTime::currentDateTime().addDays(-97), 100, error), 0);
+        QVERIFY(QFile::exists(shared));
+    }
+    void imagePathMigrationIsBatchedResumableAndScoped() {
+        QTemporaryDir dir;
+        const QString root = QDir::cleanPath(dir.path());
+        QSqlQuery q(db);
+        q.prepare("INSERT INTO record(createtime,carrier_id,camera_id,wheel_id,result,imagename,image_path) VALUES('2026-01-01 00:00:00',1,1,:w,1,'x.png',:p)");
+        const QList<QVariant> paths = {root + "/d/0.png", root + "/d/1.png", root + "/d/2.png", QVariant(), QString(),
+                                       "/elsewhere/5.png", "d/6.png", root + "/d/7.png"};
+        for (int i = 0; i < paths.size(); ++i) { q.bindValue(":w", i + 1); q.bindValue(":p", paths.at(i)); QVERIFY(q.exec()); }
+        q.finish();
+        // 空 QString 绑定后写入的是 NULL：用 SQL 字面量写入真正的空串
+        QVERIFY(q.exec("UPDATE record SET image_path='' WHERE wheel_id=5"));
+        auto stored = [&]() {
+            QStringList out; QSqlQuery s(db);
+            if (!s.exec("SELECT COALESCE(image_path,'<null>') FROM record ORDER BY rowid")) return out;
+            while (s.next()) out << s.value(0).toString();
+            return out;
+        };
+
+        // 收到停止请求：一批也不执行
+        std::atomic_bool stop{true};
+        auto result = ArchiveMaintenance::migrateImagePathsToRelative(db, root, &stop, 3, 0);
+        QVERIFY(result.ok); QVERIFY(!result.done); QCOMPARE(result.batches, 0);
+
+        // 模拟上次在第 2 行之后中断：断点之前的行不再处理，之后按 3 行一批续跑到表尾
+        QVERIFY(DBSchema::setConfig(db, ArchiveMaintenance::kImagePathMigrationRowKey, "2"));
+        result = ArchiveMaintenance::migrateImagePathsToRelative(db, root, nullptr, 3, 0);
+        QVERIFY2(result.ok, qPrintable(result.error));
+        QVERIFY(result.done);
+        QCOMPARE(result.batches, 2);
+        QCOMPARE(result.converted, 2);
+        QCOMPARE(stored(), QStringList({root + "/d/0.png", root + "/d/1.png", "d/2.png", "<null>", "",
+                                        "/elsewhere/5.png", "d/6.png", "d/7.png"}));
+        QVERIFY(DBSchema::getConfigBool(db, ArchiveMaintenance::kImagePathMigrationDoneKey, false));
+
+        // 已完成：不再处理（升级后再写入的绝对路径也保持可读，不必再迁）
+        result = ArchiveMaintenance::migrateImagePathsToRelative(db, root, nullptr, 3, 0);
+        QVERIFY(result.ok); QVERIFY(result.done); QCOMPARE(result.batches, 0);
+    }
     void orphanSweepDeletesOnlyOldUnreferencedImages() {
         QTemporaryDir dir; QVERIFY(QDir().mkpath(dir.filePath("sub")));
         const QDateTime old = QDateTime::currentDateTime().addDays(-200);
