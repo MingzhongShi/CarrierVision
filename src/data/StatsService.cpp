@@ -122,6 +122,52 @@ QVariantList rackWheelMonitorStatus(const QSqlDatabase &db)
     return out;
 }
 
+QVariantList rackDriveWheelDeviation(const QSqlDatabase &db)
+{
+    QVariantList out;
+    if (!usable(db)) return out;
+
+    // 状态缓存表保存每个架号、轮位最后一次记录的时间和图片名，再按载具轮号覆盖索引回查该条记录的偏差值（最多 400 次索引查找）
+    QSqlQuery query(db);
+    query.prepare(QStringLiteral(
+        "SELECT s.carrier_id, s.wheel_id, s.result, s.createtime,"
+        " (SELECT r.deviation FROM record r"
+        "  WHERE r.carrier_id = s.carrier_id AND r.wheel_id = s.wheel_id"
+        "    AND r.createtime = s.createtime AND r.imagename = s.imagename"
+        "  ORDER BY r.rowid DESC LIMIT 1)"
+        " FROM carrier_wheel_status s"
+        " WHERE s.carrier_id BETWEEN 1 AND 50 AND s.wheel_id BETWEEN 9 AND 16"));
+    if (!query.exec()) {
+        query.prepare(QStringLiteral(
+            "SELECT carrier_id, wheel_id, result, createtime, deviation FROM ("
+            " SELECT carrier_id, wheel_id, result, createtime, deviation,"
+            " ROW_NUMBER() OVER (PARTITION BY carrier_id, wheel_id"
+            " ORDER BY createtime DESC, rowid DESC) AS position FROM record"
+            " WHERE carrier_id BETWEEN 1 AND 50 AND wheel_id BETWEEN 9 AND 16"
+            ") WHERE position=1"));
+        if (!query.exec()) {
+            LOG_ERROR("偏差矩阵数据库查询失败: {}", query.lastError().text().toStdString());
+            return out;
+        }
+    }
+
+    while (query.next()) {
+        const int rack = query.value(0).toInt();
+        const int wheel = query.value(1).toInt();
+        if (rack < 1 || rack > 50 || wheel < 9 || wheel > 16) continue;
+
+        QVariantMap item;
+        item.insert(QStringLiteral("rack"), rack);
+        item.insert(QStringLiteral("wheel"), wheel);
+        item.insert(QStringLiteral("result"), query.value(2).toInt());
+        item.insert(QStringLiteral("time"), query.value(3).toString());
+        const QVariant deviation = query.value(4);
+        item.insert(QStringLiteral("deviation"), deviation.isNull() ? QVariant() : QVariant(deviation.toDouble()));
+        out.append(item);
+    }
+    return out;
+}
+
 QVariantList rackPhotoCounts(const QSqlDatabase &db)
 {
     QVariantList out;
@@ -498,6 +544,8 @@ QVariant run(const QSqlDatabase &db, const QString &kind, const QVariantList &ar
     } else if (kind == QLatin1String("databaseInfo")) {
         QSqlDatabase handle = db;
         result = DatabaseGuard::databaseInfo(handle, DBSchema::defaultDatabasePath(), DBSchema::csvArchiveDirectory());
+    } else if (kind == QLatin1String("rackDriveWheelDeviation")) {
+        result = rackDriveWheelDeviation(db);
     } else if (kind == QLatin1String("rackPhotoCounts")) {
         result = rackPhotoCounts(db);
     } else if (kind == QLatin1String("homepageCurrentDetection")) {

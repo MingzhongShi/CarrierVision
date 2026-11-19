@@ -12,6 +12,8 @@
 #include <QSqlQuery>
 #include <QStandardPaths>
 
+#include <cmath>
+
 namespace SettingsStore {
 
 namespace {
@@ -306,6 +308,37 @@ bool saveAlertHandlers(QSqlDatabase &db, const QStringList &names)
     const QStringList clean = normalizeAlertHandlers(names);
     const QByteArray json = QJsonDocument(QJsonArray::fromStringList(clean)).toJson(QJsonDocument::Compact);
     return DBSchema::setConfig(db, QStringLiteral("alert/handlers"), QString::fromUtf8(json));
+}
+
+bool validDeviationThresholds(double warn, double danger)
+{
+    return std::isfinite(warn) && std::isfinite(danger)
+            && std::abs(warn) <= kDeviationThresholdLimit && std::abs(danger) <= kDeviationThresholdLimit
+            && danger < warn;
+}
+
+DeviationThresholds loadDeviationThresholds(QSqlDatabase &db)
+{
+    DeviationThresholds defaults;
+    if (!db.isOpen()) return defaults;
+    bool warnOk = false;
+    bool dangerOk = false;
+    const double warn = DBSchema::getConfig(db, QStringLiteral("deviation/warnThreshold")).trimmed().toDouble(&warnOk);
+    const double danger = DBSchema::getConfig(db, QStringLiteral("deviation/dangerThreshold")).trimmed().toDouble(&dangerOk);
+    if (!warnOk || !dangerOk || !validDeviationThresholds(warn, danger)) return defaults;
+    return {warn, danger};
+}
+
+bool saveDeviationThresholds(QSqlDatabase &db, double warn, double danger)
+{
+    if (!db.isOpen() || !validDeviationThresholds(warn, danger)) return false;
+    if (!db.transaction()) return false;
+    if (!DBSchema::setConfig(db, QStringLiteral("deviation/warnThreshold"), QString::number(warn, 'g', 10))
+        || !DBSchema::setConfig(db, QStringLiteral("deviation/dangerThreshold"), QString::number(danger, 'g', 10))) {
+        db.rollback();
+        return false;
+    }
+    return db.commit();
 }
 
 } // namespace SettingsStore

@@ -498,8 +498,17 @@ Rectangle {
                                 defaultOrder: 4
                             },
                             {
-                                cmdId: "ws_heat_image",
+                                cmdId: "ws_deviation",
                                 wsIndex: 2,
+                                title: "切换至「偏差矩阵」工作区",
+                                subtitle: "50 架 8 个驱动轮最后一次偏差值，按阈值着色",
+                                category: "工作区",
+                                icon: "icon_ruler",
+                                defaultOrder: 4
+                            },
+                            {
+                                cmdId: "ws_heat_image",
+                                wsIndex: 3,
                                 title: "切换至「热力图像」工作区",
                                 subtitle: "50 架本轮 12 相机检测图像，按架号分组浏览",
                                 category: "工作区",
@@ -508,7 +517,7 @@ Rectangle {
                             },
                             {
                                 cmdId: "ws_search",
-                                wsIndex: 3,
+                                wsIndex: 4,
                                 title: "切换至「数据查询」工作区",
                                 subtitle: "历史点检图像、轮号、架号多维追溯检索",
                                 category: "质量追溯",
@@ -517,7 +526,7 @@ Rectangle {
                             },
                             {
                                 cmdId: "ws_search_today",
-                                wsIndex: 3,
+                                wsIndex: 4,
                                 subAction: "today",
                                 title: "数据查询：快速检索今日检测记录",
                                 subtitle: "自动应用当天起止时间戳并执行综合查询",
@@ -527,7 +536,7 @@ Rectangle {
                             },
                             {
                                 cmdId: "ws_search_ng",
-                                wsIndex: 3,
+                                wsIndex: 4,
                                 subAction: "ng",
                                 title: "数据查询：筛选全部 NG 缺陷图片",
                                 subtitle: "快速定位带几何超差或外观缺陷的历史检测样本",
@@ -537,7 +546,7 @@ Rectangle {
                             },
                             {
                                 cmdId: "ws_stats",
-                                wsIndex: 4,
+                                wsIndex: 5,
                                 title: "切换至「统计分析」工作区",
                                 subtitle: "驱动轮/走行轮离散度统计与周报导出",
                                 category: "工作区",
@@ -546,7 +555,7 @@ Rectangle {
                             },
                             {
                                 cmdId: "ws_stats_wheel",
-                                wsIndex: 4,
+                                wsIndex: 5,
                                 subAction: 0,
                                 title: "统计分析：轮位质量离散度看板",
                                 subtitle: "驱动轮与走行轮正态分布、标准差与工序能力",
@@ -556,7 +565,7 @@ Rectangle {
                             },
                             {
                                 cmdId: "ws_stats_rack",
-                                wsIndex: 4,
+                                wsIndex: 5,
                                 subAction: 1,
                                 title: "统计分析：架损分布与形变统计",
                                 subtitle: "50 组托架各轮位历史累积磨损与架损趋势",
@@ -566,7 +575,7 @@ Rectangle {
                             },
                             {
                                 cmdId: "ws_stats_week",
-                                wsIndex: 4,
+                                wsIndex: 5,
                                 subAction: 2,
                                 title: "统计分析：周报统计与报表导出",
                                 subtitle: "周期质量检测汇总、Drivers/Deformed 数据 CSV 导出",
@@ -576,7 +585,7 @@ Rectangle {
                             },
                             {
                                 cmdId: "ws_alert",
-                                wsIndex: 5,
+                                wsIndex: 6,
                                 title: "切换至「报警统计」工作区",
                                 subtitle: "系统缺陷事件看板、统计与告警历史",
                                 category: "工作区",
@@ -585,7 +594,7 @@ Rectangle {
                             },
                             {
                                 cmdId: "ws_alert_record",
-                                wsIndex: 5,
+                                wsIndex: 6,
                                 subAction: 0,
                                 title: "报警统计：异常告警事件明细",
                                 subtitle: "实时采集各工位硬件与算法触发的报警事件流水",
@@ -595,7 +604,7 @@ Rectangle {
                             },
                             {
                                 cmdId: "ws_alert_stats",
-                                wsIndex: 5,
+                                wsIndex: 6,
                                 subAction: 1,
                                 title: "报警统计：报警频次与趋势看板",
                                 subtitle: "按缺陷类型与工位通道聚合的报警占比图谱",
@@ -605,7 +614,7 @@ Rectangle {
                             },
                             {
                                 cmdId: "ws_log",
-                                wsIndex: 6,
+                                wsIndex: 7,
                                 title: "切换至「日志查询」工作区",
                                 subtitle: "全生命周期运行事件与底层通讯诊断日志",
                                 category: "工作区",
@@ -614,7 +623,7 @@ Rectangle {
                             },
                             {
                                 cmdId: "ws_log_error",
-                                wsIndex: 6,
+                                wsIndex: 7,
                                 subAction: "ERROR",
                                 title: "日志查询：筛选 ERROR 级故障日志",
                                 subtitle: "快速诊断网络掉线、端口占用或底层错误",
@@ -624,7 +633,7 @@ Rectangle {
                             },
                             {
                                 cmdId: "ws_log_warn",
-                                wsIndex: 6,
+                                wsIndex: 7,
                                 subAction: "WARN",
                                 title: "日志查询：筛选 WARN 级警告日志",
                                 subtitle: "排查通信重连、参数边界与潜在性能告警",
@@ -634,7 +643,7 @@ Rectangle {
                             },
                             {
                                 cmdId: "ws_settings",
-                                wsIndex: 7,
+                                wsIndex: 8,
                                 title: "切换至「系统设置」工作区",
                                 subtitle: "FTP服务、清理与安全密码",
                                 category: "工作区",
@@ -643,7 +652,7 @@ Rectangle {
                             },
                             {
                                 cmdId: "ws_settings_config",
-                                wsIndex: 7,
+                                wsIndex: 8,
                                 title: "系统设置：系统配置",
                                 subtitle: "显示偏好、相机映射、通信服务、存储清理与访问安全",
                                 category: "系统设置",
@@ -881,15 +890,15 @@ Rectangle {
                             if (typeof appController !== "undefined" && appController && appController.genericSearchRequested) {
                                 appController.genericSearchRequested("", "", item.wheelNum, "");
                             } else if (typeof root.navigateRequested === "function") {
-                                root.navigateRequested(3);
+                                root.navigateRequested(4);
                             }
                         } else if (item.cmdId === "query_rack") {
                             if (typeof root.navigateRequested === "function") {
-                                root.navigateRequested(3);
+                                root.navigateRequested(4);
                             }
                         } else if (item.cmdId === "query_ng") {
                             if (typeof root.navigateRequested === "function") {
-                                root.navigateRequested(3, "ng");
+                                root.navigateRequested(4, "ng");
                             }
                         }
                     }

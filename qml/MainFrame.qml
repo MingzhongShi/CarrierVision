@@ -172,6 +172,11 @@ Window {
             pageSource: "monitor/MonitorWorkspace.qml"
         },
         {
+            title: "偏差矩阵",
+            iconName: "icon_ruler",
+            pageSource: "monitor/DeviationMatrixWorkspace.qml"
+        },
+        {
             title: "热力图像",
             iconName: "icon_image",
             pageSource: "monitor/HeatImageWorkspace.qml"

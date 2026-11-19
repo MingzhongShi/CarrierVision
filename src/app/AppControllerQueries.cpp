@@ -103,6 +103,32 @@ bool AppController::removeAlertHandler(const QString &name)
     return true;
 }
 
+QVariantMap AppController::deviationThresholds() const
+{
+    QMutexLocker locker(&m_dbMutex);
+    QSqlDatabase db = QSqlDatabase::database();
+    const SettingsStore::DeviationThresholds t = SettingsStore::loadDeviationThresholds(db);
+    return {{QStringLiteral("warn"), t.warn}, {QStringLiteral("danger"), t.danger}};
+}
+
+bool AppController::setDeviationThresholds(double warn, double danger)
+{
+    if (!SettingsStore::validDeviationThresholds(warn, danger)) {
+        LOG_WARN("偏差矩阵阈值无效，未保存: 黄色={}, 红色={}", warn, danger);
+        return false;
+    }
+    {
+        QMutexLocker locker(&m_dbMutex);
+        QSqlDatabase db = QSqlDatabase::database();
+        if (!SettingsStore::saveDeviationThresholds(db, warn, danger)) {
+            LOG_ERROR("偏差矩阵阈值保存失败: 黄色={}, 红色={}", warn, danger);
+            return false;
+        }
+    }
+    LOG_INFO("偏差矩阵阈值已保存: 偏差 < {} 为黄色, 偏差 < {} 为红色", warn, danger);
+    return true;
+}
+
 int AppController::requestAlertOperation(const QString &kind, const QString &start, const QString &end,
                                          int rack, int wheel, int page, const QString &operatorName)
 {
