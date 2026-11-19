@@ -15,6 +15,9 @@ QVariantList wheelGroupRackStats(const QSqlDatabase &db, const QString &startDat
                                  int wheelLow, int wheelHigh);
 QVariantList rackWheelMonitorStatus(const QSqlDatabase &db);
 QVariantList rackPhotoCounts(const QSqlDatabase &db);
+// 偏差矩阵：50 架 × 8 个驱动轮（轮位 9..16）各自最后一次检测的偏差值。
+// 每项 {rack, wheel(9..16), result, time, deviation}；最后一次记录没有偏差值（旧报文或记录已过期清理）时 deviation 为空
+QVariantList rackDriveWheelDeviation(const QSqlDatabase &db);
 // preferredRack 不在 1~50 时取最新入库记录的架号
 QVariantMap homepageCurrentDetection(const QSqlDatabase &db, int preferredRack);
 QVariantList wheelRackResultStats(const QSqlDatabase &db, const QString &startDate, const QString &endDate,

@@ -130,6 +130,9 @@ public:
     QStringList alertHandlers() const;
     Q_INVOKABLE QString addAlertHandler(const QString &name);
     Q_INVOKABLE bool removeAlertHandler(const QString &name);
+    // 偏差矩阵着色阈值 {warn, danger}；set 在 danger < warn 且数值有效时保存并返回 true
+    Q_INVOKABLE QVariantMap deviationThresholds() const;
+    Q_INVOKABLE bool setDeviationThresholds(double warn, double danger);
     // 异步统计：kind 与参数见 StatsService::run；结果经 statsReady 返回。
     Q_INVOKABLE int requestStats(const QString &kind, const QVariantList &args = {});
     // 某架号某轮位最新一张检测图像，后台查询，结果经 latestWheelImageReady 返回（无记录时为空 map）

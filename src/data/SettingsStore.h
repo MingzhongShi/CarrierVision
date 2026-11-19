@@ -55,4 +55,17 @@ QStringList normalizeAlertHandlers(const QStringList &names);
 QStringList loadAlertHandlers(QSqlDatabase &db);
 bool saveAlertHandlers(QSqlDatabase &db, const QStringList &names);
 
+// 偏差矩阵的显示阈值（mm）：偏差 >= warn 为绿色，danger <= 偏差 < warn 为黄色，偏差 < danger 为红色。
+// 只影响偏差矩阵页的着色，不参与 OK/NG 判定。保存在 system_config（deviation/warnThreshold、deviation/dangerThreshold）。
+struct DeviationThresholds {
+    double warn = -10.0;
+    double danger = -20.0;
+};
+constexpr double kDeviationThresholdLimit = 1000.0;
+// 两个值都有限、在 ±kDeviationThresholdLimit 内且 danger < warn 时有效
+bool validDeviationThresholds(double warn, double danger);
+// 库中缺失或无效时返回默认值（-10 / -20）
+DeviationThresholds loadDeviationThresholds(QSqlDatabase &db);
+bool saveDeviationThresholds(QSqlDatabase &db, double warn, double danger);
+
 } // namespace SettingsStore

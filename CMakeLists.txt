@@ -184,6 +184,7 @@ qt_add_qml_module(CarrierVision
 
         # 全景监控
         qml/monitor/MonitorWorkspace.qml
+        qml/monitor/DeviationMatrixWorkspace.qml
         qml/monitor/HeatImageWorkspace.qml
 
         # 数据查询

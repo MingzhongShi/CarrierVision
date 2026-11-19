@@ -775,6 +775,91 @@ private slots:
         QSqlDatabase::removeDatabase(connectionName);
     }
 
+    void driveWheelDeviationMatrixUsesLatestRecord()
+    {
+        // 偏差矩阵取每个架号、驱动轮最后一次记录的偏差值；走行轮不出现；最后一次为旧报文（无偏差）时为空
+        const QString connectionName = QStringLiteral("TestDeviationMatrixDb");
+        {
+            QSqlDatabase db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connectionName);
+            db.setDatabaseName(QStringLiteral(":memory:"));
+            QVERIFY(db.open());
+            QVERIFY(DBSchema::ensureAllTables(db));
+            QSqlQuery q(db);
+            QVERIFY(q.exec("INSERT INTO record(createtime,carrier_id,camera_id,wheel_id,result,imagename,deviation) VALUES"
+                           "('2026-11-19 10:00:00',5,1,9,1,'a.jpg',-3.5),"
+                           "('2026-11-19 11:00:00',5,1,9,0,'b.jpg',-21.25),"
+                           "('2026-11-19 09:00:00',5,1,10,1,'c.jpg',-12.0),"
+                           "('2026-11-19 10:00:00',5,1,1,1,'d.jpg',-30.0),"
+                           "('2026-11-19 10:00:00',6,1,16,1,'e.jpg',-1.0),"
+                           "('2026-11-19 12:00:00',6,1,16,1,'f.jpg',NULL)"));
+
+            auto toMap = [](const QVariantList &rows) {
+                QMap<QString, QVariantMap> out;
+                for (const QVariant &row : rows) {
+                    const QVariantMap m = row.toMap();
+                    out.insert(QStringLiteral("%1:%2").arg(m.value("rack").toInt()).arg(m.value("wheel").toInt()), m);
+                }
+                return out;
+            };
+            auto check = [&](const QMap<QString, QVariantMap> &cells) {
+                QCOMPARE(cells.size(), 3);
+                QVERIFY(!cells.contains(QStringLiteral("5:1")));
+                QCOMPARE(cells.value(QStringLiteral("5:9")).value("deviation").toDouble(), -21.25);
+                QCOMPARE(cells.value(QStringLiteral("5:9")).value("result").toInt(), 0);
+                QCOMPARE(cells.value(QStringLiteral("5:9")).value("time").toString(), QStringLiteral("2026-11-19 11:00:00"));
+                QCOMPARE(cells.value(QStringLiteral("5:10")).value("deviation").toDouble(), -12.0);
+                QVERIFY(cells.value(QStringLiteral("6:16")).value("deviation").isNull());
+            };
+            check(toMap(StatsService::rackDriveWheelDeviation(db)));
+            bool known = false;
+            check(toMap(StatsService::run(db, QStringLiteral("rackDriveWheelDeviation"), {}, &known).toList()));
+            QVERIFY(known);
+
+            // 没有状态缓存表的库回退到直接查 record
+            QVERIFY(q.exec("DROP TRIGGER trg_record_wheel_status"));
+            QVERIFY(q.exec("DROP TABLE carrier_wheel_status"));
+            check(toMap(StatsService::rackDriveWheelDeviation(db)));
+            db.close();
+        }
+        QSqlDatabase::removeDatabase(connectionName);
+    }
+
+    void deviationThresholdsRoundTripAndValidate()
+    {
+        const QString connectionName = QStringLiteral("TestDeviationThresholdDb");
+        {
+            QSqlDatabase db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), connectionName);
+            db.setDatabaseName(QStringLiteral(":memory:"));
+            QVERIFY(db.open());
+            QVERIFY(DBSchema::ensureAllTables(db));
+
+            // 未配置时为默认 -10 / -20
+            SettingsStore::DeviationThresholds t = SettingsStore::loadDeviationThresholds(db);
+            QCOMPARE(t.warn, -10.0);
+            QCOMPARE(t.danger, -20.0);
+
+            QVERIFY(SettingsStore::saveDeviationThresholds(db, -8.5, -15.25));
+            t = SettingsStore::loadDeviationThresholds(db);
+            QCOMPARE(t.warn, -8.5);
+            QCOMPARE(t.danger, -15.25);
+
+            // 红色阈值必须小于黄色阈值；非有限值和超范围值拒绝，保留原值
+            QVERIFY(!SettingsStore::saveDeviationThresholds(db, -20.0, -10.0));
+            QVERIFY(!SettingsStore::saveDeviationThresholds(db, -10.0, -10.0));
+            QVERIFY(!SettingsStore::saveDeviationThresholds(db, std::numeric_limits<double>::quiet_NaN(), -20.0));
+            QVERIFY(!SettingsStore::saveDeviationThresholds(db, -10.0, -5000.0));
+            QCOMPARE(SettingsStore::loadDeviationThresholds(db).warn, -8.5);
+
+            // 库中被改坏的值回到默认
+            QVERIFY(DBSchema::setConfig(db, QStringLiteral("deviation/dangerThreshold"), QStringLiteral("abc")));
+            t = SettingsStore::loadDeviationThresholds(db);
+            QCOMPARE(t.warn, -10.0);
+            QCOMPARE(t.danger, -20.0);
+            db.close();
+        }
+        QSqlDatabase::removeDatabase(connectionName);
+    }
+
     void alertHandlersRoundTripAndNormalize()
     {
         const QString connectionName = QStringLiteral("TestAlertHandlersDb");
