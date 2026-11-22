@@ -65,7 +65,7 @@ jobs:
 
       - name: Upload Test Logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: Windows-test-logs
           path: |
@@ -104,7 +104,7 @@ jobs:
           Compress-Archive -Path "$env:PACKAGE_PATH\*" -DestinationPath "$env:PACKAGE_NAME.zip" -Force
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ env.PACKAGE_NAME }}
           path: ${{ env.PACKAGE_NAME }}.zip
